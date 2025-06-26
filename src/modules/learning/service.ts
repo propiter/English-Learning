@@ -311,16 +311,16 @@ export const learningService = {
   },
 
   // Helper methods
-  private countWords(text: string): number {
+  countWords(text: string): number {
     return text.trim().split(/\s+/).filter(word => word.length > 0).length;
   },
 
-  private calculateAverageScore(sessions: any[], field: string): number {
+  calculateAverageScore(sessions: any[], field: string): number {
     const scores = sessions.map(s => s[field]).filter(score => score !== null && score !== undefined);
     return scores.length > 0 ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : 0;
   },
 
-  private calculateWeeklyProgress(sessions: any[]) {
+  calculateWeeklyProgress(sessions: any[]) {
     const weeklyData: { [key: string]: { sessions: number; avgScore: number; totalXP: number } } = {};
 
     sessions.forEach(session => {
@@ -347,7 +347,7 @@ export const learningService = {
       .sort((a, b) => a.week.localeCompare(b.week));
   },
 
-  private analyzePerformance(sessions: any[]) {
+  analyzePerformance(sessions: any[]) {
     const skills = ['pronunciation', 'fluency', 'grammar', 'vocabulary'];
     const averages = skills.map(skill => ({
       skill,
@@ -364,7 +364,7 @@ export const learningService = {
     };
   },
 
-  private calculateImprovementRate(sessions: any[]): number {
+  calculateImprovementRate(sessions: any[]): number {
     if (sessions.length < 4) return 0;
 
     const quarter = Math.floor(sessions.length / 4);
@@ -377,7 +377,7 @@ export const learningService = {
     return Math.round(((lastAvg - firstAvg) / firstAvg) * 100);
   },
 
-  private calculateWeeklyTrends(sessions: any[]) {
+  calculateWeeklyTrends(sessions: any[]) {
     const weeklyData: { [key: string]: number[] } = {};
 
     sessions.forEach(session => {
@@ -395,12 +395,12 @@ export const learningService = {
       .sort((a, b) => a.week.localeCompare(b.week));
   },
 
-  private async getUserAchievements(userId: string) {
+  async getUserAchievements(userId: string) {
     // This would be implemented with the achievements system
     return [];
   },
 
-  private async updateUserProgressAsync(userId: string, xpEarned: number) {
+  async updateUserProgressAsync(userId: string, xpEarned: number) {
     try {
       const user = await prisma.user.findUnique({ where: { id: userId } });
       if (!user) return;

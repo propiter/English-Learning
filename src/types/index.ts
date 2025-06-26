@@ -69,9 +69,11 @@ export interface EvaluationResponse {
   };
 }
 
+export type PlatformType = 'telegram' | 'whatsapp';
+
 export interface MessagePayload {
   userId: string;
-  platform: 'telegram' | 'whatsapp';
+  platform: PlatformType;
   messageType: 'text' | 'audio';
   content: string; // Text content or audio file path
   chatId: string;

@@ -138,7 +138,7 @@ export const contentService = {
     return availableTopics[Math.floor(Math.random() * availableTopics.length)];
   },
 
-  private getTopicsByLevel(cefrLevel: string) {
+  getTopicsByLevel(cefrLevel: string) {
     const topicsByLevel: { [key: string]: any[] } = {
       A0: [
         { title: "Basic Greetings", categories: ["general"], prompt: "Practice saying hello and introducing yourself." },

@@ -17,12 +17,14 @@ model User {
   firstName       String
   lastName        String?
   username        String?
+  language        String   @default("en")
   cefrLevel       String   @default("A0") // A0, A1, A2, B1, B2, C1, C2
   xp              Int      @default(0)
   streak          Int      @default(0)
   lastActiveAt    DateTime @default(now())
   interests       String[] // e.g., ["technology", "movies"]
   learningGoal    String?  // e.g., "business", "travel"
+  isOnboarding    Boolean  @default(true)
   onboardingStep  String   @default("welcome") // welcome, level_test, interests, goal, completed
   isActive        Boolean  @default(true)
   timezone        String   @default("UTC")
@@ -48,8 +50,16 @@ model Subscription {
   currentPeriodEnd   DateTime?
   cancelAtPeriodEnd  Boolean @default(false)
   endsAt          DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+}
+
+model WebhookLog {
+  id          String    @id @default(uuid())
+  platform    String    // e.g., 'telegram', 'whatsapp'
+  webhookData Json      // Raw webhook data
+  processed   Boolean   @default(false)
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   
   @@map("subscriptions")
 }
