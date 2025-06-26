@@ -1,12 +1,39 @@
 import axios from 'axios';
+import crypto from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { MessagePayload } from '../../types/index.js';
+import { orchestratorService } from '../orchestrator/service.js';
+import { userService } from '../users/service.js';
 
 export class MessagingGatewayService {
   private readonly telegramToken = process.env.TELEGRAM_BOT_TOKEN;
   private readonly telegramApiUrl = `https://api.telegram.org/bot${this.telegramToken}`;
   private readonly whatsappApiUrl = process.env.WHATSAPP_API_URL;
   private readonly whatsappToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  // Webhook signature verification
+  private verifyTelegramWebhook(body: any, signature: string): boolean {
+    if (!this.telegramToken) return false;
+    
+    const hash = crypto
+      .createHmac('sha256', this.telegramToken)
+      .update(JSON.stringify(body))
+      .digest('hex');
+    
+    return hash === signature;
+  }
+
+  private verifyWhatsAppWebhook(body: any, signature: string): boolean {
+    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+    if (!verifyToken) return false;
+    
+    const hash = crypto
+      .createHmac('sha256', verifyToken)
+      .update(JSON.stringify(body))
+      .digest('hex');
+    
+    return `sha256=${hash}` === signature;
+  }
 
   async sendMessage(userId: string, platform: 'telegram' | 'whatsapp', audioUrl?: string, text?: string) {
     try {
@@ -99,8 +126,20 @@ export class MessagingGatewayService {
     }
   }
 
-  async processIncomingWebhook(platform: 'telegram' | 'whatsapp', webhookData: any) {
+  async processIncomingWebhook(platform: 'telegram' | 'whatsapp', webhookData: any, signature?: string) {
     try {
+      // Verify webhook signature in production
+      if (process.env.NODE_ENV === 'production' && signature) {
+        const isValid = platform === 'telegram' 
+          ? this.verifyTelegramWebhook(webhookData, signature)
+          : this.verifyWhatsAppWebhook(webhookData, signature);
+        
+        if (!isValid) {
+          logger.warn(`Invalid webhook signature for ${platform}`);
+          return { success: false, processed: false, error: 'Invalid signature' };
+        }
+      }
+
       let messageData = null;
 
       if (platform === 'telegram') {
@@ -110,8 +149,11 @@ export class MessagingGatewayService {
       }
 
       if (messageData) {
-        // Forward to orchestrator for processing
-        await this.forwardToOrchestrator(messageData);
+        // Ensure user exists and forward to orchestrator
+        await this.forwardToOrchestrator({
+          ...messageData,
+          rawData: webhookData
+        });
       }
 
       return { success: true, processed: !!messageData };
@@ -121,12 +163,17 @@ export class MessagingGatewayService {
     }
   }
 
-  private processTelegramWebhook(webhookData: any) {
+  private processTelegramWebhook(webhookData: any): MessagePayload | null {
     const message = webhookData.message;
     if (!message) return null;
 
     const chatId = message.chat.id.toString();
     const userId = message.from?.id?.toString();
+
+    if (!userId) {
+      logger.warn('Telegram webhook missing user ID');
+      return null;
+    }
 
     // Handle voice messages
     if (message.voice) {
@@ -134,7 +181,7 @@ export class MessagingGatewayService {
         userId,
         platform: 'telegram' as const,
         messageType: 'audio' as const,
-        content: message.voice.file_id, // Telegram file_id
+        content: message.voice.file_id,
         chatId,
         userData: {
           firstName: message.from.first_name,
@@ -163,7 +210,7 @@ export class MessagingGatewayService {
     return null;
   }
 
-  private processWhatsAppWebhook(webhookData: any) {
+  private processWhatsAppWebhook(webhookData: any): MessagePayload | null {
     const entry = webhookData.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
@@ -174,13 +221,18 @@ export class MessagingGatewayService {
     const message = messages[0];
     const from = message.from;
 
+    if (!from) {
+      logger.warn('WhatsApp webhook missing sender ID');
+      return null;
+    }
+
     // Handle audio messages
     if (message.type === 'audio') {
       return {
         userId: from,
         platform: 'whatsapp' as const,
         messageType: 'audio' as const,
-        content: message.audio.id, // WhatsApp media ID
+        content: message.audio.id,
         chatId: from,
         userData: {
           firstName: value.contacts?.[0]?.profile?.name || 'User'
@@ -205,58 +257,45 @@ export class MessagingGatewayService {
     return null;
   }
 
-  private async forwardToOrchestrator(messageData: any) {
+  private async forwardToOrchestrator(messageData: MessagePayload & { rawData: any }) {
     try {
-      const baseURL = process.env.API_BASE_URL || 'http://localhost:3000';
-      
-      // First, ensure user exists
+      // Ensure user exists first
       await this.ensureUserExists(messageData);
-
-      // Then process the message
-      await axios.post(`${baseURL}/api/orchestrator/process-message`, {
-        userId: messageData.userId,
-        audioInput: messageData.content,
-        platform: messageData.platform
-      }, {
-        headers: {
-          'x-api-key': process.env.INTERNAL_API_KEY
-        }
-      });
-
+      
+      // Process the message directly using orchestratorService
+      await orchestratorService.handleUserMessage(
+        messageData.userId,
+        messageData.content,
+        messageData.platform,
+        messageData.rawData
+      );
     } catch (error) {
       logger.error('Error forwarding to orchestrator:', error);
       throw error;
     }
   }
 
-  private async ensureUserExists(messageData: any) {
+  private async ensureUserExists(messageData: MessagePayload & { rawData: any }) {
     try {
-      const baseURL = process.env.API_BASE_URL || 'http://localhost:3000';
-      
-      // Check if user exists
-      const checkResponse = await axios.get(
-        `${baseURL}/api/users/platform/${messageData.platform}/${messageData.userId}`,
-        {
-          headers: { 'x-api-key': process.env.INTERNAL_API_KEY }
-        }
+      // Check if user exists by platform ID
+      const existingUser = await userService.getUserByPlatformId(
+        messageData.platform,
+        messageData.userId
       );
 
-      if (!checkResponse.data.data.exists) {
-        // Create new user
-        const userData: any = {
-          firstName: messageData.userData.firstName,
-          lastName: messageData.userData.lastName,
-          username: messageData.userData.username
+      if (!existingUser) {
+        // Create new user with proper data structure
+        const userData = {
+          [messageData.platform === 'telegram' ? 'telegramId' : 'whatsappId']: messageData.userId,
+          firstName: messageData.userData?.firstName || 'User',
+          lastName: messageData.userData?.lastName || '',
+          username: messageData.userData?.username || `user_${Date.now()}`,
+          language: 'es', // Default to Spanish
+          timezone: 'UTC'
         };
 
-        if (messageData.platform === 'telegram') {
-          userData.telegramId = messageData.userId;
-        } else {
-          userData.whatsappId = messageData.userId;
-        }
-
-        await axios.post(`${baseURL}/api/users/register`, userData);
-        logger.info(`New user registered: ${messageData.userId} on ${messageData.platform}`);
+        const newUser = await userService.createUser(userData);
+        logger.info(`Created new user: ${newUser.id} for ${messageData.platform}`);
       }
     } catch (error) {
       logger.error('Error ensuring user exists:', error);

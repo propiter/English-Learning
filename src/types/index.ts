@@ -33,7 +33,6 @@ export interface Session {
   vocabulary?: number;
   feedbackAudioUrl?: string;
   feedbackText?: string;
-  teacherPersona: string;
   duration?: number;
   wordsSpoken?: number;
   xpEarned: number;
@@ -65,18 +64,22 @@ export interface EvaluationResponse {
     pronunciation: string[];
     grammar: string[];
     vocabulary: string[];
+    fluency: string[];
     overall: string;
   };
 }
 
-export type PlatformType = 'telegram' | 'whatsapp';
-
 export interface MessagePayload {
   userId: string;
-  platform: PlatformType;
+  platform: 'telegram' | 'whatsapp';
   messageType: 'text' | 'audio';
   content: string; // Text content or audio file path
   chatId: string;
+  userData?: {
+    firstName?: string;
+    lastName?: string;
+    username?: string;
+  };
 }
 
 export interface FeedbackResponse {

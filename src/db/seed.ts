@@ -21,7 +21,8 @@ Guidelines:
 - Keep feedback conversational and warm
 - Use emojis sparingly to make it friendly
 
-Your response should be suitable for text-to-speech conversion, so avoid complex formatting.`
+Your response should be suitable for text-to-speech conversion, so avoid complex formatting.`,
+      variables: ['studentName', 'level', 'interests']
     },
     
     // Text summary prompts (Reporter persona)
@@ -41,7 +42,8 @@ Guidelines:
 - Use encouraging tone
 - Include specific examples when possible
 
-Format your response as a brief, encouraging summary that helps the student understand their progress.`
+Format your response as a brief, encouraging summary that helps the student understand their progress.`,
+      variables: ['scores', 'level']
     },
 
     // Level-specific daily practice prompts
@@ -56,7 +58,8 @@ Format your response as a brief, encouraging summary that helps the student unde
 - Common daily activities
 - Simple pronunciation corrections
 - Encouraging basic communication attempts
-- Using very simple language in feedback`
+- Using very simple language in feedback`,
+      variables: ['interests']
     },
 
     {
@@ -70,7 +73,8 @@ Format your response as a brief, encouraging summary that helps the student unde
 - Connecting ideas with basic conjunctions
 - Improving pronunciation clarity
 - Encouraging longer responses
-- Building confidence in communication`
+- Building confidence in communication`,
+      variables: ['interests']
     },
 
     {
@@ -84,7 +88,8 @@ Format your response as a brief, encouraging summary that helps the student unde
 - Using various tenses correctly
 - Improving fluency and naturalness
 - Expanding vocabulary range
-- Encouraging more detailed responses`
+- Encouraging more detailed responses`,
+      variables: ['interests']
     },
 
     {
@@ -98,7 +103,8 @@ Format your response as a brief, encouraging summary that helps the student unde
 - Coherent argumentation
 - Nuanced vocabulary usage
 - Pronunciation refinement
-- Encouraging abstract discussion`
+- Encouraging abstract discussion`,
+      variables: ['interests']
     },
 
     {
@@ -112,7 +118,8 @@ Format your response as a brief, encouraging summary that helps the student unde
 - Advanced grammar and style
 - Precise vocabulary and register
 - Subtle pronunciation improvements
-- Encouraging native-like fluency`
+- Encouraging native-like fluency`,
+      variables: ['interests']
     },
 
     // Onboarding prompts
@@ -126,17 +133,21 @@ Format your response as a brief, encouraging summary that helps the student unde
 - Explain the level assessment process clearly
 - Make students feel comfortable speaking English
 - Provide clear instructions for each step
-- Be patient and supportive throughout onboarding`
+- Be patient and supportive throughout onboarding`,
+      variables: ['studentName']
     }
   ];
 
   for (const prompt of prompts) {
     await prisma.prompt.upsert({
       where: {
-        // Use a composite identifier since we don't have a unique constraint
+        // Create a unique identifier based on the combination
         id: `${prompt.cefrLevel}-${prompt.promptType}-${prompt.persona}`
       },
-      update: prompt,
+      update: {
+        ...prompt,
+        updatedAt: new Date()
+      },
       create: {
         id: `${prompt.cefrLevel}-${prompt.promptType}-${prompt.persona}`,
         ...prompt
@@ -218,8 +229,14 @@ async function seedAchievements() {
   for (const achievement of achievements) {
     await prisma.achievement.upsert({
       where: { code: achievement.code },
-      update: achievement,
-      create: achievement
+      update: {
+        ...achievement,
+        requirements: achievement.requirements
+      },
+      create: {
+        ...achievement,
+        requirements: achievement.requirements
+      }
     });
   }
 

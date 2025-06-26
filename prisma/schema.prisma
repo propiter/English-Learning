@@ -21,7 +21,7 @@ model User {
   cefrLevel       String   @default("A0") // A0, A1, A2, B1, B2, C1, C2
   xp              Int      @default(0)
   streak          Int      @default(0)
-  lastActiveAt    DateTime @default(now())
+  lastActivity    DateTime @default(now())
   interests       String[] // e.g., ["technology", "movies"]
   learningGoal    String?  // e.g., "business", "travel"
   isOnboarding    Boolean  @default(true)
@@ -34,6 +34,7 @@ model User {
   subscription    Subscription?
   sessions        Session[]
   achievements    UserAchievement[]
+  levelTests      LevelTest[]
   
   @@map("users")
 }
@@ -50,6 +51,10 @@ model Subscription {
   currentPeriodEnd   DateTime?
   cancelAtPeriodEnd  Boolean @default(false)
   endsAt          DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("subscriptions")
 }
 
 model WebhookLog {
@@ -61,7 +66,7 @@ model WebhookLog {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   
-  @@map("subscriptions")
+  @@map("webhook_logs")
 }
 
 model Session {
@@ -71,28 +76,49 @@ model Session {
   sessionType     String   @default("practice") // practice, evaluation, onboarding
   userInput       String   // Original audio file path or text
   transcription   String
+  inputType       String   @default("audio") // audio, text
   evaluationJson  Json     // Complete JSON from evaluation API
   feedbackAudioUrl String? // URL to generated feedback audio
   feedbackText    String?  // Generated summary text
   overallScore    Float
   pronunciation   Float?
   fluency         Float?
-  accuracy        Float?
-  completeness    Float?
+  grammar         Float?
+  vocabulary      Float?
   xpEarned        Int      @default(0)
   duration        Int?     // Session duration in seconds
+  wordsSpoken     Int?     // Number of words spoken
   createdAt       DateTime @default(now())
   
   @@map("sessions")
+}
+
+model LevelTest {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  testType      String   @default("initial") // initial, level_up
+  fromLevel     String?
+  resultLevel   String
+  questions     Json
+  responses     Json
+  overallScore  Float
+  completed     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+  
+  @@map("level_tests")
 }
 
 model Prompt {
   id              String   @id @default(uuid())
   cefrLevel       String   // Level this prompt applies to
   promptType      String   // "daily_practice", "onboarding", "evaluation_test", "level_up"
-  category        String?  // "business", "travel", "casual", etc.
+  persona         String   @default("alex") // alex, reporter, etc.
+  title           String
   systemMessage   String
   userPrompt      String?  // Optional user-facing prompt
+  variables       String[] @default([]) // Template variables
   isActive        Boolean  @default(true)
   priority        Int      @default(0) // Higher priority prompts are used first
   createdAt       DateTime @default(now())
@@ -103,12 +129,13 @@ model Prompt {
 
 model Achievement {
   id              String   @id @default(uuid())
-  name            String   @unique
+  code            String   @unique // Unique identifier for achievement
+  title           String
   description     String
   icon            String?
   xpReward        Int      @default(0)
   badgeColor      String   @default("#gold")
-  requirement     Json     // Flexible requirement definition
+  requirements    Json     // Flexible requirement definition
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   

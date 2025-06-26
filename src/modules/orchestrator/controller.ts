@@ -6,7 +6,7 @@ import { logger } from '../../utils/logger.js';
 export const orchestratorController = {
   // Main entry point for processing user messages
   processMessage: asyncHandler(async (req: Request, res: Response) => {
-    const { userId, audioInput, platform } = req.body;
+    const { userId, audioInput, platform, rawData } = req.body;
 
     if (!userId || !audioInput || !platform) {
       throw createError('Missing required fields: userId, audioInput, platform', 400);
@@ -18,7 +18,7 @@ export const orchestratorController = {
 
     logger.info(`Processing message for user ${userId} on ${platform}`);
 
-    const result = await orchestratorService.handleUserMessage(userId, audioInput, platform);
+    const result = await orchestratorService.handleUserMessage(userId, audioInput, platform, rawData);
 
     res.json({
       success: true,

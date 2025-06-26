@@ -18,6 +18,8 @@ export const learningService = {
     duration?: number;
     wordsSpoken?: number;
     sessionType: string;
+    feedbackAudioUrl?: string;
+    feedbackText?: string;
   }) {
     try {
       // Calculate XP for this session
@@ -41,8 +43,11 @@ export const learningService = {
         }
       });
 
-      // Update user progress in background
-      this.updateUserProgressAsync(sessionData.userId, xpEarned);
+      // Update user progress in background (with proper error handling)
+      this.updateUserProgressAsync(sessionData.userId, xpEarned)
+        .catch(error => {
+          logger.error('Background user progress update failed:', error);
+        });
 
       return session;
     } catch (error) {
@@ -52,118 +57,133 @@ export const learningService = {
   },
 
   async getSessionById(sessionId: string) {
-    return await prisma.session.findUnique({
-      where: { id: sessionId },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            cefrLevel: true
+    try {
+      return await prisma.session.findUnique({
+        where: { id: sessionId },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              cefrLevel: true
+            }
           }
         }
-      }
-    });
+      });
+    } catch (error) {
+      logger.error('Error fetching session:', error);
+      throw error;
+    }
   },
 
   async getUserProgress(userId: string, timeframeDays: number = 30) {
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - timeframeDays);
+    try {
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - timeframeDays);
 
-    const sessions = await prisma.session.findMany({
-      where: {
-        userId,
-        createdAt: {
-          gte: startDate
+      const sessions = await prisma.session.findMany({
+        where: {
+          userId,
+          createdAt: {
+            gte: startDate
+          }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          cefrLevel: true,
+          xp: true,
+          streak: true,
+          lastActivity: true
         }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
+      });
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        cefrLevel: true,
-        xp: true,
-        streak: true,
-        lastActivity: true
+      if (!user) {
+        throw createError('User not found', 404);
       }
-    });
 
-    if (!user) {
-      throw createError('User not found', 404);
+      // Calculate statistics
+      const totalSessions = sessions.length;
+      const averageScore = totalSessions > 0 
+        ? sessions.reduce((sum, session) => sum + session.overallScore, 0) / totalSessions
+        : 0;
+
+      const averageScores = {
+        overall: averageScore,
+        pronunciation: this.calculateAverageScore(sessions, 'pronunciation'),
+        fluency: this.calculateAverageScore(sessions, 'fluency'),
+        grammar: this.calculateAverageScore(sessions, 'grammar'),
+        vocabulary: this.calculateAverageScore(sessions, 'vocabulary')
+      };
+
+      // Weekly progress
+      const weeklyProgress = this.calculateWeeklyProgress(sessions);
+
+      // Strengths and weaknesses
+      const analysis = this.analyzePerformance(sessions);
+
+      return {
+        timeframe: timeframeDays,
+        totalSessions,
+        averageScores,
+        weeklyProgress,
+        analysis,
+        user: {
+          cefrLevel: user.cefrLevel,
+          xp: user.xp,
+          streak: user.streak,
+          lastActivity: user.lastActivity
+        }
+      };
+    } catch (error) {
+      logger.error('Error getting user progress:', error);
+      throw error;
     }
-
-    // Calculate statistics
-    const totalSessions = sessions.length;
-    const averageScore = totalSessions > 0 
-      ? sessions.reduce((sum, session) => sum + session.overallScore, 0) / totalSessions
-      : 0;
-
-    const averageScores = {
-      overall: averageScore,
-      pronunciation: this.calculateAverageScore(sessions, 'pronunciation'),
-      fluency: this.calculateAverageScore(sessions, 'fluency'),
-      grammar: this.calculateAverageScore(sessions, 'grammar'),
-      vocabulary: this.calculateAverageScore(sessions, 'vocabulary')
-    };
-
-    // Weekly progress
-    const weeklyProgress = this.calculateWeeklyProgress(sessions);
-
-    // Strengths and weaknesses
-    const analysis = this.analyzePerformance(sessions);
-
-    return {
-      timeframe: timeframeDays,
-      totalSessions,
-      averageScores,
-      weeklyProgress,
-      analysis,
-      user: {
-        cefrLevel: user.cefrLevel,
-        xp: user.xp,
-        streak: user.streak,
-        lastActivity: user.lastActivity
-      }
-    };
   },
 
   async getSessionHistory(userId: string, page: number = 1, limit: number = 20) {
-    const skip = (page - 1) * limit;
+    try {
+      const skip = (page - 1) * limit;
 
-    const [sessions, total] = await Promise.all([
-      prisma.session.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-        select: {
-          id: true,
-          transcription: true,
-          overallScore: true,
-          pronunciation: true,
-          fluency: true,
-          grammar: true,
-          vocabulary: true,
-          xpEarned: true,
-          duration: true,
-          sessionType: true,
-          createdAt: true
+      const [sessions, total] = await Promise.all([
+        prisma.session.findMany({
+          where: { userId },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+          select: {
+            id: true,
+            transcription: true,
+            overallScore: true,
+            pronunciation: true,
+            fluency: true,
+            grammar: true,
+            vocabulary: true,
+            xpEarned: true,
+            duration: true,
+            sessionType: true,
+            createdAt: true
+          }
+        }),
+        prisma.session.count({ where: { userId } })
+      ]);
+
+      return {
+        sessions,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
         }
-      }),
-      prisma.session.count({ where: { userId } })
-    ]);
-
-    return {
-      sessions,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    };
+      };
+    } catch (error) {
+      logger.error('Error getting session history:', error);
+      throw error;
+    }
   },
 
   calculateXP(score: number, duration: number = 0, sessionType: string, userLevel: string): number {
@@ -173,7 +193,7 @@ export const learningService = {
     const scoreMultiplier = Math.max(0.5, Math.min(2, score / 50));
 
     // Session type multiplier
-    const typeMultipliers = {
+    const typeMultipliers: { [key: string]: number } = {
       'daily_practice': 1,
       'level_test': 2,
       'challenge': 1.5
@@ -190,7 +210,7 @@ export const learningService = {
     const finalXP = Math.round(
       baseXP * 
       scoreMultiplier * 
-      (typeMultipliers[sessionType as keyof typeof typeMultipliers] || 1) * 
+      (typeMultipliers[sessionType] || 1) * 
       (levelMultipliers[userLevel] || 1) + 
       durationBonus
     );
@@ -199,115 +219,125 @@ export const learningService = {
   },
 
   async checkLevelUpEligibility(userId: string) {
-    const recentSessions = await prisma.session.findMany({
-      where: {
-        userId,
-        sessionType: 'daily_practice',
-        createdAt: {
-          gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Last 30 days
-        }
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 15
-    });
+    try {
+      const recentSessions = await prisma.session.findMany({
+        where: {
+          userId,
+          sessionType: 'daily_practice',
+          createdAt: {
+            gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Last 30 days
+          }
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 15
+      });
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { cefrLevel: true }
-    });
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { cefrLevel: true }
+      });
 
-    if (!user || recentSessions.length < 8) {
+      if (!user || recentSessions.length < 8) {
+        return {
+          eligible: false,
+          reason: 'Need at least 8 practice sessions in the last 30 days',
+          sessionsNeeded: Math.max(0, 8 - recentSessions.length)
+        };
+      }
+
+      const averageScore = recentSessions.reduce((sum, session) => sum + session.overallScore, 0) / recentSessions.length;
+      const consistentHighScore = recentSessions.slice(0, 5).every(session => session.overallScore >= 70);
+
+      const currentLevel = CEFR_LEVELS.find(level => level.code === user.cefrLevel);
+      const nextLevel = CEFR_LEVELS.find(level => level.minScore > (currentLevel?.maxScore || 0));
+
+      if (!nextLevel) {
+        return {
+          eligible: false,
+          reason: 'Already at maximum level',
+          currentLevel: user.cefrLevel
+        };
+      }
+
+      const requiredScore = nextLevel.minScore - 5; // 5 points buffer
+      const eligible = averageScore >= requiredScore && consistentHighScore;
+
       return {
-        eligible: false,
-        reason: 'Need at least 8 practice sessions in the last 30 days',
-        sessionsNeeded: 8 - recentSessions.length
+        eligible,
+        currentLevel: user.cefrLevel,
+        nextLevel: nextLevel.code,
+        averageScore: Math.round(averageScore),
+        requiredScore,
+        reason: eligible 
+          ? 'Ready for level-up test!' 
+          : `Need average score of ${requiredScore}+ with consistent performance`
       };
+    } catch (error) {
+      logger.error('Error checking level up eligibility:', error);
+      throw error;
     }
-
-    const averageScore = recentSessions.reduce((sum, session) => sum + session.overallScore, 0) / recentSessions.length;
-    const consistentHighScore = recentSessions.slice(0, 5).every(session => session.overallScore >= 70);
-
-    const currentLevel = CEFR_LEVELS.find(level => level.code === user.cefrLevel);
-    const nextLevel = CEFR_LEVELS.find(level => level.minScore > (currentLevel?.maxScore || 0));
-
-    if (!nextLevel) {
-      return {
-        eligible: false,
-        reason: 'Already at maximum level',
-        currentLevel: user.cefrLevel
-      };
-    }
-
-    const requiredScore = nextLevel.minScore - 5; // 5 points buffer
-    const eligible = averageScore >= requiredScore && consistentHighScore;
-
-    return {
-      eligible,
-      currentLevel: user.cefrLevel,
-      nextLevel: nextLevel.code,
-      averageScore: Math.round(averageScore),
-      requiredScore,
-      reason: eligible 
-        ? 'Ready for level-up test!' 
-        : `Need average score of ${requiredScore}+ with consistent performance`
-    };
   },
 
   async getLearningAnalytics(userId: string, startDate?: Date, endDate?: Date) {
-    const dateFilter: any = { userId };
-    
-    if (startDate || endDate) {
-      dateFilter.createdAt = {};
-      if (startDate) dateFilter.createdAt.gte = startDate;
-      if (endDate) dateFilter.createdAt.lte = endDate;
-    }
+    try {
+      const dateFilter: any = { userId };
+      
+      if (startDate || endDate) {
+        dateFilter.createdAt = {};
+        if (startDate) dateFilter.createdAt.gte = startDate;
+        if (endDate) dateFilter.createdAt.lte = endDate;
+      }
 
-    const sessions = await prisma.session.findMany({
-      where: dateFilter,
-      orderBy: { createdAt: 'asc' }
-    });
+      const sessions = await prisma.session.findMany({
+        where: dateFilter,
+        orderBy: { createdAt: 'asc' }
+      });
 
-    if (sessions.length === 0) {
-      return {
-        totalSessions: 0,
-        timeSpent: 0,
-        averageScore: 0,
-        improvementRate: 0,
-        skillBreakdown: {},
-        weeklyTrends: [],
-        achievements: []
+      if (sessions.length === 0) {
+        return {
+          totalSessions: 0,
+          timeSpent: 0,
+          averageScore: 0,
+          improvementRate: 0,
+          skillBreakdown: {},
+          weeklyTrends: [],
+          achievements: []
+        };
+      }
+
+      // Time spent (in minutes)
+      const timeSpent = sessions.reduce((sum, session) => sum + (session.duration || 0), 0) / 60;
+
+      // Improvement rate (comparing first vs last 25% of sessions)
+      const improvementRate = this.calculateImprovementRate(sessions);
+
+      // Skill breakdown
+      const skillBreakdown = {
+        pronunciation: this.calculateAverageScore(sessions, 'pronunciation'),
+        fluency: this.calculateAverageScore(sessions, 'fluency'),
+        grammar: this.calculateAverageScore(sessions, 'grammar'),
+        vocabulary: this.calculateAverageScore(sessions, 'vocabulary')
       };
+
+      // Weekly trends
+      const weeklyTrends = this.calculateWeeklyTrends(sessions);
+
+      // Mock achievements (in production, this would come from a separate achievements system)
+      const achievements = await this.getUserAchievements(userId);
+
+      return {
+        totalSessions: sessions.length,
+        timeSpent: Math.round(timeSpent),
+        averageScore: Math.round(sessions.reduce((sum, s) => sum + s.overallScore, 0) / sessions.length),
+        improvementRate,
+        skillBreakdown,
+        weeklyTrends,
+        achievements
+      };
+    } catch (error) {
+      logger.error('Error getting learning analytics:', error);
+      throw error;
     }
-
-    // Time spent (in minutes)
-    const timeSpent = sessions.reduce((sum, session) => sum + (session.duration || 0), 0) / 60;
-
-    // Improvement rate (comparing first vs last 25% of sessions)
-    const improvementRate = this.calculateImprovementRate(sessions);
-
-    // Skill breakdown
-    const skillBreakdown = {
-      pronunciation: this.calculateAverageScore(sessions, 'pronunciation'),
-      fluency: this.calculateAverageScore(sessions, 'fluency'),
-      grammar: this.calculateAverageScore(sessions, 'grammar'),
-      vocabulary: this.calculateAverageScore(sessions, 'vocabulary')
-    };
-
-    // Weekly trends
-    const weeklyTrends = this.calculateWeeklyTrends(sessions);
-
-    // Mock achievements (in production, this would come from a separate achievements system)
-    const achievements = await this.getUserAchievements(userId);
-
-    return {
-      totalSessions: sessions.length,
-      timeSpent: Math.round(timeSpent),
-      averageScore: Math.round(sessions.reduce((sum, s) => sum + s.overallScore, 0) / sessions.length),
-      improvementRate,
-      skillBreakdown,
-      weeklyTrends,
-      achievements
-    };
   },
 
   // Helper methods
@@ -396,14 +426,36 @@ export const learningService = {
   },
 
   async getUserAchievements(userId: string) {
-    // This would be implemented with the achievements system
-    return [];
+    try {
+      const achievements = await prisma.userAchievement.findMany({
+        where: { userId },
+        include: {
+          achievement: true
+        },
+        orderBy: { unlockedAt: 'desc' }
+      });
+
+      return achievements.map(ua => ({
+        id: ua.achievement.id,
+        code: ua.achievement.code,
+        title: ua.achievement.title,
+        description: ua.achievement.description,
+        icon: ua.achievement.icon,
+        unlockedAt: ua.unlockedAt
+      }));
+    } catch (error) {
+      logger.error('Error getting user achievements:', error);
+      return [];
+    }
   },
 
   async updateUserProgressAsync(userId: string, xpEarned: number) {
     try {
       const user = await prisma.user.findUnique({ where: { id: userId } });
-      if (!user) return;
+      if (!user) {
+        logger.warn(`User not found for progress update: ${userId}`);
+        return;
+      }
 
       const now = new Date();
       const lastActivity = new Date(user.lastActivity);
@@ -424,8 +476,11 @@ export const learningService = {
           lastActivity: now
         }
       });
+
+      logger.info(`User progress updated: ${userId}, XP: +${xpEarned}, Streak: ${newStreak}`);
     } catch (error) {
       logger.error('Error updating user progress:', error);
+      // Don't throw - this is a background operation
     }
   }
 };
