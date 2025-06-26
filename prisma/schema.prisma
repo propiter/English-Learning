@@ -1,0 +1,135 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(uuid())
+  telegramId      String?  @unique
+  whatsappId      String?  @unique
+  firstName       String
+  lastName        String?
+  username        String?
+  cefrLevel       String   @default("A0") // A0, A1, A2, B1, B2, C1, C2
+  xp              Int      @default(0)
+  streak          Int      @default(0)
+  lastActiveAt    DateTime @default(now())
+  interests       String[] // e.g., ["technology", "movies"]
+  learningGoal    String?  // e.g., "business", "travel"
+  onboardingStep  String   @default("welcome") // welcome, level_test, interests, goal, completed
+  isActive        Boolean  @default(true)
+  timezone        String   @default("UTC")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  subscription    Subscription?
+  sessions        Session[]
+  achievements    UserAchievement[]
+  
+  @@map("users")
+}
+
+model Subscription {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            String   // "free", "premium", "pro"
+  status          String   // "active", "canceled", "past_due", "trialing"
+  stripeCustomerId String?
+  stripeSubscriptionId String?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean @default(false)
+  endsAt          DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("subscriptions")
+}
+
+model Session {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionType     String   @default("practice") // practice, evaluation, onboarding
+  userInput       String   // Original audio file path or text
+  transcription   String
+  evaluationJson  Json     // Complete JSON from evaluation API
+  feedbackAudioUrl String? // URL to generated feedback audio
+  feedbackText    String?  // Generated summary text
+  overallScore    Float
+  pronunciation   Float?
+  fluency         Float?
+  accuracy        Float?
+  completeness    Float?
+  xpEarned        Int      @default(0)
+  duration        Int?     // Session duration in seconds
+  createdAt       DateTime @default(now())
+  
+  @@map("sessions")
+}
+
+model Prompt {
+  id              String   @id @default(uuid())
+  cefrLevel       String   // Level this prompt applies to
+  promptType      String   // "daily_practice", "onboarding", "evaluation_test", "level_up"
+  category        String?  // "business", "travel", "casual", etc.
+  systemMessage   String
+  userPrompt      String?  // Optional user-facing prompt
+  isActive        Boolean  @default(true)
+  priority        Int      @default(0) // Higher priority prompts are used first
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("prompts")
+}
+
+model Achievement {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  description     String
+  icon            String?
+  xpReward        Int      @default(0)
+  badgeColor      String   @default("#gold")
+  requirement     Json     // Flexible requirement definition
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  
+  userAchievements UserAchievement[]
+  
+  @@map("achievements")
+}
+
+model UserAchievement {
+  id            String      @id @default(uuid())
+  userId        String
+  achievementId String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  unlockedAt    DateTime    @default(now())
+  
+  @@unique([userId, achievementId])
+  @@map("user_achievements")
+}
+
+model ApiUsage {
+  id              String   @id @default(uuid())
+  userId          String?
+  service         String   // "openai", "evaluation_api", "speech_to_text"
+  endpoint        String
+  tokensUsed      Int?
+  cost            Float?
+  responseTime    Int?     // Response time in milliseconds
+  success         Boolean  @default(true)
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+  
+  @@map("api_usage")
+}
