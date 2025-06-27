@@ -15,8 +15,6 @@ services:
       - JWT_SECRET=your-super-secret-jwt-key-minimum-32-characters-long
       - INTERNAL_API_KEY=your-internal-api-key-for-module-communication-32-chars
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - EVALUATION_API_URL=${EVALUATION_API_URL}
-      - EVALUATION_API_KEY=${EVALUATION_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - WHATSAPP_API_URL=${WHATSAPP_API_URL}
       - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
@@ -26,6 +24,14 @@ services:
       - LOG_LEVEL=info
       - RATE_LIMIT_WINDOW_MS=900000
       - RATE_LIMIT_MAX_REQUESTS=100
+      # Minio/S3 Configuration
+      - STORAGE_PROVIDER=aws # Keep as 'aws' for SDK compatibility
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_ENDPOINT=${S3_ENDPOINT} # e.g., http://minio:9000
+      - S3_FORCE_PATH_STYLE=true
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,4 +1,5 @@
 export type Platform = 'telegram' | 'whatsapp';
+export type InputType = 'text' | 'audio';
 
 export interface User {
   id: string;
@@ -25,8 +26,8 @@ export interface Session {
   id: string;
   userId: string;
   userInput: string;
-  transcription: string;
-  inputType: string;
+  transcription: string | null;
+  inputType: InputType;
   evaluationJson: any;
   overallScore: number;
   pronunciation?: number;
@@ -72,11 +73,12 @@ export interface EvaluationResponse {
 }
 
 export interface MessagePayload {
-  userId: string;
+  platformId: string; // The ID from the specific platform (e.g., Telegram chat ID, WhatsApp phone number)
   platform: Platform;
-  messageType: 'text' | 'audio';
-  content: string; // Text content or audio file path
-  chatId: string;
+  inputType: InputType;
+  content: string; // Text content or audio file ID/path
+  chatId?: string; // Redundant but can be useful
+  rawData?: any;
   userData?: {
     firstName?: string;
     lastName?: string;

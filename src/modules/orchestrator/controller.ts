@@ -6,19 +6,29 @@ import { logger } from '../../utils/logger.js';
 export const orchestratorController = {
   // Main entry point for processing user messages
   processMessage: asyncHandler(async (req: Request, res: Response) => {
-    const { userId, audioInput, platform, rawData } = req.body;
+    const { userId, platform, inputType, content, rawData } = req.body;
 
-    if (!userId || !audioInput || !platform) {
-      throw createError('Missing required fields: userId, audioInput, platform', 400);
+    if (!userId || !platform || !inputType || !content) {
+      throw createError('Missing required fields: userId, platform, inputType, content', 400);
     }
 
     if (!['telegram', 'whatsapp'].includes(platform)) {
-      throw createError('Invalid platform. Must be telegram or whatsapp', 400);
+      throw createError('Invalid platform. Must be "telegram" or "whatsapp"', 400);
+    }
+    
+    if (!['text', 'audio'].includes(inputType)) {
+      throw createError('Invalid inputType. Must be "text" or "audio"', 400);
     }
 
-    logger.info(`Processing message for user ${userId} on ${platform}`);
+    logger.info(`Processing ${inputType} message for user ${userId} on ${platform}`);
 
-    const result = await orchestratorService.handleUserMessage(userId, audioInput, platform, rawData);
+    const result = await orchestratorService.handleUserMessage(
+      userId,
+      inputType,
+      content,
+      platform,
+      rawData
+    );
 
     res.json({
       success: true,

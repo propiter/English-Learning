@@ -76,7 +76,7 @@ model Session {
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   sessionType     String   @default("practice") // practice, evaluation, onboarding
   userInput       String   // Original audio file path or text
-  transcription   String
+  transcription   String?  // Null if input is text
   inputType       String   @default("audio") // audio, text
   evaluationJson  Json     // Complete JSON from evaluation API
   feedbackAudioUrl String? // URL to generated feedback audio
@@ -134,11 +134,11 @@ model Achievement {
   title           String
   description     String
   icon            String?
-  xpReward        Int      @default(0)
-  badgeColor      String   @default("#gold")
+  xpReward        Int      @default(0) @map("xp_reward")
+  badgeColor      String   @default("#FFD700") @map("badge_color")
   requirements    Json     // Flexible requirement definition
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
   
   userAchievements UserAchievement[]
   
@@ -147,13 +147,13 @@ model Achievement {
 
 model UserAchievement {
   id            String      @id @default(uuid())
-  userId        String
-  achievementId String
+  userId        String      @map("user_id")
+  achievementId String      @map("achievement_id")
   user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
-  unlockedAt    DateTime    @default(now())
+  unlockedAt    DateTime    @default(now()) @map("unlocked_at")
   
-  @@unique([userId, achievementId])
+  @@unique([userId, achievementId], name: "user_achievements_unique_user_achievement")
   @@map("user_achievements")
 }
 

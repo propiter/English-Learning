@@ -20,10 +20,6 @@ const envSchema = z.object({
   // OpenAI
   OPENAI_API_KEY: z.string().startsWith('sk-', 'Invalid OpenAI API key format'),
   
-  // External APIs
-  EVALUATION_API_URL: z.string().url('Invalid evaluation API URL'),
-  EVALUATION_API_KEY: z.string().min(1, 'Evaluation API key is required'),
-  
   // Messaging platforms
   TELEGRAM_BOT_TOKEN: z.string().min(1, 'Telegram bot token is required'),
   WHATSAPP_API_URL: z.string().url('Invalid WhatsApp API URL'),
@@ -40,13 +36,15 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
   LOG_FILE_PATH: z.string().default('./logs'),
   
-  // File storage
+  // File storage (S3/Minio)
   STORAGE_PROVIDER: z.enum(['aws', 'gcp', 'azure', 'local']).default('aws'),
-  AWS_ACCESS_KEY_ID: z.string().optional(),
-  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_ACCESS_KEY_ID: z.string().min(1, 'AWS Access Key ID is required for S3/Minio storage'),
+  AWS_SECRET_ACCESS_KEY: z.string().min(1, 'AWS Secret Access Key is required for S3/Minio storage'),
   AWS_REGION: z.string().default('us-east-1'),
-  AWS_S3_BUCKET: z.string().optional(),
-  
+  AWS_S3_BUCKET: z.string().min(1, 'S3/Minio Bucket name is required'),
+  S3_ENDPOINT: z.string().url('A valid S3/Minio endpoint URL is required').optional(),
+  S3_FORCE_PATH_STYLE: z.string().transform(v => v === 'true').pipe(z.boolean()).optional(),
+
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: z.string().transform(Number).pipe(z.number().int().positive()).default('900000'),
   RATE_LIMIT_MAX_REQUESTS: z.string().transform(Number).pipe(z.number().int().positive()).default('100'),
@@ -56,7 +54,6 @@ const envSchema = z.object({
   SUPPORTED_AUDIO_FORMATS: z.string().default('mp3,wav,ogg,m4a'),
   
   // API timeouts
-  EVALUATION_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('30000'),
   OPENAI_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('60000'),
   TELEGRAM_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('10000'),
   WHATSAPP_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('10000'),
@@ -67,35 +64,36 @@ const envSchema = z.object({
  */
 function validateEnvironment() {
   try {
-    const env = envSchema.parse(process.env);
-    logger.info('Environment variables validated successfully');
-    return env;
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      const errorMessages = error.errors.map(err => {
+    const parsedEnv = envSchema.safeParse(process.env);
+    if (!parsedEnv.success) {
+      const errorMessages = parsedEnv.error.errors.map(err => {
         const varName = err.path.join('.');
         const currentValue = process.env[varName];
         const valueInfo = currentValue ? ` (current value: "${currentValue}")` : ' (not set)';
         return `- ${varName}: ${err.message}${valueInfo}`;
       });
       
-      logger.error('Error de validación de variables de entorno:');
-      logger.error('Las siguientes variables tienen problemas:');
+      logger.error('Environment variable validation error:');
+      logger.error('The following variables have issues:');
       logger.error(errorMessages.join('\n'));
       
-      console.error('\n=== ERROR DE CONFIGURACIÓN ===');
-      console.error('Las siguientes variables de entorno tienen problemas:');
+      console.error('\n=== CONFIGURATION ERROR ===');
+      console.error('The following environment variables have issues:');
       console.error(errorMessages.join('\n'));
-      console.error('\nPor favor, verifica tu archivo .env y asegúrate de que:');
-      console.error('1. Todas las variables requeridas estén definidas');
-      console.error('2. Los valores tengan el formato correcto');
-      console.error('3. No haya espacios en blanco alrededor de los signos =');
-      console.error('4. Las URLs comiencen con http:// o https:// según corresponda');
+      console.error('\nPlease check your .env file and ensure that:');
+      console.error('1. All required variables are defined.');
+      console.error('2. Values have the correct format (e.g., URLs, keys).');
+      console.error('3. There are no extra spaces around the = sign.');
       console.error('==============================\n');
       
       process.exit(1);
     }
-    throw error;
+    
+    logger.info('Environment variables validated successfully');
+    return parsedEnv.data;
+  } catch (error) {
+    logger.error('An unexpected error occurred during environment validation.', { error });
+    process.exit(1);
   }
 }
 
