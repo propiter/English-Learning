@@ -67,23 +67,36 @@ export class MessagingGatewayService {
 
     try {
       if (audioUrl) {
-        const audioResponse = await axios.post(`${this.telegramApiUrl}/sendVoice`, {
+        const payload = {
           chat_id: chatId,
           voice: audioUrl,
           caption: "🎧 Here's your personalized feedback!"
-        }, {
+        };
+        
+        logger.info('Attempting to send Telegram voice message', {
+          url: `${this.telegramApiUrl}/sendVoice`,
+          payload
+        });
+
+        const audioResponse = await axios.post(`${this.telegramApiUrl}/sendVoice`, payload, {
           timeout: env.TELEGRAM_API_TIMEOUT
         });
         messages.push(audioResponse.data);
       }
 
       if (text) {
-        const textResponse = await axios.post(`${this.telegramApiUrl}/sendMessage`, {
+        const payload = {
           chat_id: chatId,
-          text: text
-          // FIX: Removed parse_mode to prevent 400 errors from malformed markdown in AI-generated text.
-          // parse_mode: 'Markdown'
-        }, {
+          text: text,
+          parse_mode: 'Markdown'
+        };
+
+        logger.info('Attempting to send Telegram text message', {
+          url: `${this.telegramApiUrl}/sendMessage`,
+          payload
+        });
+
+        const textResponse = await axios.post(`${this.telegramApiUrl}/sendMessage`, payload, {
           timeout: env.TELEGRAM_API_TIMEOUT
         });
         messages.push(textResponse.data);

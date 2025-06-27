@@ -1,12 +1,14 @@
 import { OpenAI } from 'openai';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { logger, logUserAction, logApiCall } from '../../utils/logger.js';
 import { FeedbackResponse, EvaluationResponse, User, Platform } from '../../types/index.js';
 import { userService } from '../users/service.js';
 import { createError } from '../../middleware/errorHandler.js';
 import env from '../../config/environment.js';
 import prisma from '../../config/database.js';
+import { s3Client } from '../../config/s3.js';
 import { onboardingService } from '../onboarding/service.js';
 
 const openai = new OpenAI({
@@ -282,21 +284,38 @@ export class OrchestratorService {
   }
 
   private async _uploadAudioToStorage(audioBuffer: Buffer, userId: string): Promise<string> {
-    // This function should be replaced with a proper S3/Minio upload client
-    // For now, we construct the URL based on environment variables
     const key = `feedback/${userId}/${uuidv4()}.mp3`;
-    
-    if (env.S3_ENDPOINT) {
-      // Minio or other S3-compatible storage
-      const url = new URL(`${env.AWS_S3_BUCKET}/${key}`, env.S3_ENDPOINT);
-      logger.info('Constructed Minio URL', { url: url.href });
-      // In a real scenario, you would use the S3 client to upload here
-      // s3.putObject({ Bucket: env.AWS_S3_BUCKET, Key: key, Body: audioBuffer }).promise();
-      return url.href;
-    } else {
-      // Default AWS S3
-      logger.info('Constructing AWS S3 URL.', { key, bucket: env.AWS_S3_BUCKET });
-      return `https://${env.AWS_S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+    const bucket = env.AWS_S3_BUCKET;
+
+    try {
+      logger.info('Uploading audio to S3/Minio...', { bucket, key, size: audioBuffer.length });
+
+      const command = new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: audioBuffer,
+        ContentType: 'audio/mpeg',
+        ACL: 'public-read',
+      });
+
+      await s3Client.send(command);
+
+      let publicUrl: string;
+      if (env.S3_ENDPOINT) {
+        // For Minio or other S3-compatible storage
+        const endpoint = env.S3_ENDPOINT.replace(/\/$/, '');
+        publicUrl = `${endpoint}/${bucket}/${key}`;
+      } else {
+        // For AWS S3
+        publicUrl = `https://${bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+      }
+      
+      logger.info('Successfully uploaded audio file.', { url: publicUrl });
+      return publicUrl;
+
+    } catch (error) {
+      logger.error('Failed to upload audio to S3/Minio.', { bucket, key, error });
+      throw createError('Failed to upload audio file to storage.', 500);
     }
   }
 
