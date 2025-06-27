@@ -1,16 +1,27 @@
-FROM node:18-alpine
+# Multi-stage build for production optimization
+FROM node:18-alpine AS base
 
-# Set working directory
+# Install dumb-init for proper signal handling
+RUN apk add --no-cache dumb-init
+
+# Create app directory
 WORKDIR /app
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
 
 # Copy package files
 COPY package*.json ./
 COPY tsconfig*.json ./
 
 # Install dependencies
-RUN npm ci --only=production
+FROM base AS deps
+RUN npm ci --only=production && npm cache clean --force
 
-# Copy source code
+# Build stage
+FROM base AS build
+RUN npm ci
 COPY src/ ./src/
 COPY prisma/ ./prisma/
 
@@ -20,23 +31,37 @@ RUN npx prisma generate
 # Build TypeScript
 RUN npm run build
 
+# Production stage
+FROM base AS production
+
+# Copy production dependencies
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy built application
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+
+# Copy Prisma schema for runtime
+COPY prisma/ ./prisma/
+
 # Create logs directory
 RUN mkdir -p logs
 
-# Create non-root user
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nextjs -u 1001
-
 # Change ownership of the app directory
 RUN chown -R nextjs:nodejs /app
+
+# Switch to non-root user
 USER nextjs
 
 # Expose port
 EXPOSE 3000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
 # Start the application
-CMD ["npm", "start"]
+CMD ["node", "dist/server.js"]

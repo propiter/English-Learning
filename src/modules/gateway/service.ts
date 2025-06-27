@@ -1,63 +1,68 @@
 import axios from 'axios';
 import crypto from 'crypto';
-import { logger } from '../../utils/logger.js';
+import { logger, logUserAction, logApiCall } from '../../utils/logger.js';
 import { MessagePayload } from '../../types/index.js';
 import { orchestratorService } from '../orchestrator/service.js';
 import { userService } from '../users/service.js';
+import { createError } from '../../middleware/errorHandler.js';
+import { validateRequestBody, telegramWebhookSchema, whatsappWebhookSchema } from '../../utils/validation.js';
+import env from '../../config/environment.js';
 
+/**
+ * Messaging gateway service for handling platform communications
+ */
 export class MessagingGatewayService {
-  private readonly telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+  private readonly telegramToken = env.TELEGRAM_BOT_TOKEN;
   private readonly telegramApiUrl = `https://api.telegram.org/bot${this.telegramToken}`;
-  private readonly whatsappApiUrl = process.env.WHATSAPP_API_URL;
-  private readonly whatsappToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  private readonly whatsappApiUrl = env.WHATSAPP_API_URL;
+  private readonly whatsappToken = env.WHATSAPP_ACCESS_TOKEN;
 
-  // Webhook signature verification
-  private verifyTelegramWebhook(body: any, signature: string): boolean {
-    if (!this.telegramToken) return false;
-    
-    const hash = crypto
-      .createHmac('sha256', this.telegramToken)
-      .update(JSON.stringify(body))
-      .digest('hex');
-    
-    return hash === signature;
-  }
-
-  private verifyWhatsAppWebhook(body: any, signature: string): boolean {
-    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
-    if (!verifyToken) return false;
-    
-    const hash = crypto
-      .createHmac('sha256', verifyToken)
-      .update(JSON.stringify(body))
-      .digest('hex');
-    
-    return `sha256=${hash}` === signature;
-  }
-
+  /**
+   * Send message to user on specified platform
+   */
   async sendMessage(userId: string, platform: 'telegram' | 'whatsapp', audioUrl?: string, text?: string) {
+    const startTime = Date.now();
+    
     try {
-      if (platform === 'telegram') {
-        return await this.sendTelegramMessage(userId, audioUrl, text);
-      } else {
-        return await this.sendWhatsAppMessage(userId, audioUrl, text);
+      if (!audioUrl && !text) {
+        throw createError('Either audioUrl or text must be provided', 400);
       }
+
+      let result;
+      if (platform === 'telegram') {
+        result = await this._sendTelegramMessage(userId, audioUrl, text);
+      } else if (platform === 'whatsapp') {
+        result = await this._sendWhatsAppMessage(userId, audioUrl, text);
+      } else {
+        throw createError(`Unsupported platform: ${platform}`, 400);
+      }
+
+      logApiCall(`${platform}-api`, 'send-message', Date.now() - startTime, true);
+      logUserAction(userId, 'message_sent', { platform, hasAudio: !!audioUrl, hasText: !!text });
+      
+      return result;
     } catch (error) {
-      logger.error(`Error sending message to ${platform}:`, error);
+      logApiCall(`${platform}-api`, 'send-message', Date.now() - startTime, false, error instanceof Error ? error.message : 'Unknown error');
+      logger.error(`Error sending message to ${platform}:`, { userId, error });
       throw error;
     }
   }
 
-  private async sendTelegramMessage(chatId: string, audioUrl?: string, text?: string) {
-    try {
-      const messages = [];
+  /**
+   * Send message via Telegram
+   */
+  private async _sendTelegramMessage(chatId: string, audioUrl?: string, text?: string) {
+    const messages = [];
 
+    try {
       // Send audio first if available
       if (audioUrl) {
         const audioResponse = await axios.post(`${this.telegramApiUrl}/sendVoice`, {
           chat_id: chatId,
           voice: audioUrl,
           caption: "🎧 Here's your personalized feedback!"
+        }, {
+          timeout: env.TELEGRAM_API_TIMEOUT
         });
         messages.push(audioResponse.data);
       }
@@ -68,21 +73,26 @@ export class MessagingGatewayService {
           chat_id: chatId,
           text: `📊 ${text}`,
           parse_mode: 'HTML'
+        }, {
+          timeout: env.TELEGRAM_API_TIMEOUT
         });
         messages.push(textResponse.data);
       }
 
       return messages;
     } catch (error) {
-      logger.error('Error sending Telegram message:', error);
-      throw error;
+      logger.error('Error sending Telegram message:', { chatId, error });
+      throw createError('Failed to send Telegram message', 500);
     }
   }
 
-  private async sendWhatsAppMessage(phoneNumber: string, audioUrl?: string, text?: string) {
-    try {
-      const messages = [];
+  /**
+   * Send message via WhatsApp
+   */
+  private async _sendWhatsAppMessage(phoneNumber: string, audioUrl?: string, text?: string) {
+    const messages = [];
 
+    try {
       // Send audio first if available
       if (audioUrl) {
         const audioResponse = await axios.post(`${this.whatsappApiUrl}/messages`, {
@@ -96,7 +106,8 @@ export class MessagingGatewayService {
           headers: {
             'Authorization': `Bearer ${this.whatsappToken}`,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: env.WHATSAPP_API_TIMEOUT
         });
         messages.push(audioResponse.data);
       }
@@ -114,56 +125,115 @@ export class MessagingGatewayService {
           headers: {
             'Authorization': `Bearer ${this.whatsappToken}`,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: env.WHATSAPP_API_TIMEOUT
         });
         messages.push(textResponse.data);
       }
 
       return messages;
     } catch (error) {
-      logger.error('Error sending WhatsApp message:', error);
-      throw error;
+      logger.error('Error sending WhatsApp message:', { phoneNumber, error });
+      throw createError('Failed to send WhatsApp message', 500);
     }
   }
 
+  /**
+   * Process incoming webhook from messaging platforms
+   */
   async processIncomingWebhook(platform: 'telegram' | 'whatsapp', webhookData: any, signature?: string) {
+    const startTime = Date.now();
+    
     try {
+      // Validate webhook data structure
+      this._validateWebhookData(platform, webhookData);
+
       // Verify webhook signature in production
       if (process.env.NODE_ENV === 'production' && signature) {
-        const isValid = platform === 'telegram' 
-          ? this.verifyTelegramWebhook(webhookData, signature)
-          : this.verifyWhatsAppWebhook(webhookData, signature);
-        
-        if (!isValid) {
-          logger.warn(`Invalid webhook signature for ${platform}`);
-          return { success: false, processed: false, error: 'Invalid signature' };
-        }
+        this._verifyWebhookSignature(platform, webhookData, signature);
       }
 
-      let messageData = null;
-
-      if (platform === 'telegram') {
-        messageData = this.processTelegramWebhook(webhookData);
-      } else {
-        messageData = this.processWhatsAppWebhook(webhookData);
-      }
-
+      // Extract message data
+      const messageData = this._extractMessageData(platform, webhookData);
+      
       if (messageData) {
-        // Ensure user exists and forward to orchestrator
-        await this.forwardToOrchestrator({
-          ...messageData,
-          rawData: webhookData
-        });
+        // Ensure user exists and process message
+        await this._processMessage(messageData);
+        
+        logApiCall(`${platform}-webhook`, 'process', Date.now() - startTime, true);
+        return { success: true, processed: true };
       }
 
-      return { success: true, processed: !!messageData };
+      logApiCall(`${platform}-webhook`, 'process', Date.now() - startTime, true);
+      return { success: true, processed: false, reason: 'No message data found' };
+
     } catch (error) {
-      logger.error('Error processing webhook:', error);
+      logApiCall(`${platform}-webhook`, 'process', Date.now() - startTime, false, error instanceof Error ? error.message : 'Unknown error');
+      logger.error('Error processing webhook:', { platform, error });
       throw error;
     }
   }
 
-  private processTelegramWebhook(webhookData: any): MessagePayload | null {
+  /**
+   * Validate webhook data structure
+   */
+  private _validateWebhookData(platform: 'telegram' | 'whatsapp', webhookData: any) {
+    try {
+      if (platform === 'telegram') {
+        validateRequestBody(telegramWebhookSchema)(webhookData);
+      } else {
+        validateRequestBody(whatsappWebhookSchema)(webhookData);
+      }
+    } catch (error) {
+      logger.warn('Invalid webhook data structure:', { platform, error });
+      throw createError('Invalid webhook data structure', 400);
+    }
+  }
+
+  /**
+   * Verify webhook signature
+   */
+  private _verifyWebhookSignature(platform: 'telegram' | 'whatsapp', webhookData: any, signature: string) {
+    let isValid = false;
+    
+    if (platform === 'telegram') {
+      const expectedSignature = crypto
+        .createHmac('sha256', this.telegramToken)
+        .update(JSON.stringify(webhookData))
+        .digest('hex');
+      isValid = signature === expectedSignature;
+    } else {
+      const expectedSignature = 'sha256=' + crypto
+        .createHmac('sha256', env.WHATSAPP_VERIFY_TOKEN)
+        .update(JSON.stringify(webhookData))
+        .digest('hex');
+      isValid = signature === expectedSignature;
+    }
+    
+    if (!isValid) {
+      logger.warn(`Invalid webhook signature for ${platform}`, { 
+        provided: signature.substring(0, 10) + '...',
+        platform 
+      });
+      throw createError('Invalid webhook signature', 401);
+    }
+  }
+
+  /**
+   * Extract message data from webhook
+   */
+  private _extractMessageData(platform: 'telegram' | 'whatsapp', webhookData: any): MessagePayload | null {
+    if (platform === 'telegram') {
+      return this._processTelegramWebhook(webhookData);
+    } else {
+      return this._processWhatsAppWebhook(webhookData);
+    }
+  }
+
+  /**
+   * Process Telegram webhook data
+   */
+  private _processTelegramWebhook(webhookData: any): MessagePayload | null {
     const message = webhookData.message;
     if (!message) return null;
 
@@ -210,7 +280,10 @@ export class MessagingGatewayService {
     return null;
   }
 
-  private processWhatsAppWebhook(webhookData: any): MessagePayload | null {
+  /**
+   * Process WhatsApp webhook data
+   */
+  private _processWhatsAppWebhook(webhookData: any): MessagePayload | null {
     const entry = webhookData.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
@@ -257,34 +330,50 @@ export class MessagingGatewayService {
     return null;
   }
 
-  private async forwardToOrchestrator(messageData: MessagePayload & { rawData: any }) {
+  /**
+   * Process extracted message data
+   */
+  private async _processMessage(messageData: MessagePayload) {
     try {
-      // Ensure user exists first
-      await this.ensureUserExists(messageData);
+      // Ensure user exists
+      await this._ensureUserExists(messageData);
       
-      // Process the message directly using orchestratorService
+      // Forward to orchestrator for processing
       await orchestratorService.handleUserMessage(
         messageData.userId,
         messageData.content,
         messageData.platform,
-        messageData.rawData
+        messageData
       );
+
+      logUserAction(messageData.userId, 'message_processed', { 
+        platform: messageData.platform,
+        messageType: messageData.messageType 
+      });
+
     } catch (error) {
-      logger.error('Error forwarding to orchestrator:', error);
+      logger.error('Error processing message:', { 
+        userId: messageData.userId,
+        platform: messageData.platform,
+        error 
+      });
       throw error;
     }
   }
 
-  private async ensureUserExists(messageData: MessagePayload & { rawData: any }) {
+  /**
+   * Ensure user exists in database
+   */
+  private async _ensureUserExists(messageData: MessagePayload) {
     try {
-      // Check if user exists by platform ID
+      // Check if user exists
       const existingUser = await userService.getUserByPlatformId(
         messageData.platform,
         messageData.userId
       );
 
       if (!existingUser) {
-        // Create new user with proper data structure
+        // Create new user
         const userData = {
           [messageData.platform === 'telegram' ? 'telegramId' : 'whatsappId']: messageData.userId,
           firstName: messageData.userData?.firstName || 'User',
@@ -295,11 +384,79 @@ export class MessagingGatewayService {
         };
 
         const newUser = await userService.createUser(userData);
+        
+        logUserAction(newUser.id, 'user_created', { 
+          platform: messageData.platform,
+          source: 'webhook' 
+        });
+        
         logger.info(`Created new user: ${newUser.id} for ${messageData.platform}`);
       }
     } catch (error) {
-      logger.error('Error ensuring user exists:', error);
-      throw error;
+      logger.error('Error ensuring user exists:', { 
+        userId: messageData.userId,
+        platform: messageData.platform,
+        error 
+      });
+      throw createError('Failed to ensure user exists', 500);
+    }
+  }
+
+  /**
+   * Download audio file from Telegram
+   */
+  async downloadTelegramAudio(fileId: string): Promise<Buffer> {
+    try {
+      // Get file info
+      const fileInfoResponse = await axios.get(`${this.telegramApiUrl}/getFile`, {
+        params: { file_id: fileId },
+        timeout: env.TELEGRAM_API_TIMEOUT
+      });
+
+      const filePath = fileInfoResponse.data.result.file_path;
+      const fileUrl = `https://api.telegram.org/file/bot${this.telegramToken}/${filePath}`;
+
+      // Download file
+      const fileResponse = await axios.get(fileUrl, {
+        responseType: 'arraybuffer',
+        timeout: env.TELEGRAM_API_TIMEOUT
+      });
+
+      return Buffer.from(fileResponse.data);
+    } catch (error) {
+      logger.error('Error downloading Telegram audio:', { fileId, error });
+      throw createError('Failed to download audio file', 500);
+    }
+  }
+
+  /**
+   * Download audio file from WhatsApp
+   */
+  async downloadWhatsAppAudio(mediaId: string): Promise<Buffer> {
+    try {
+      // Get media URL
+      const mediaInfoResponse = await axios.get(`${this.whatsappApiUrl}/${mediaId}`, {
+        headers: {
+          'Authorization': `Bearer ${this.whatsappToken}`
+        },
+        timeout: env.WHATSAPP_API_TIMEOUT
+      });
+
+      const mediaUrl = mediaInfoResponse.data.url;
+
+      // Download file
+      const fileResponse = await axios.get(mediaUrl, {
+        headers: {
+          'Authorization': `Bearer ${this.whatsappToken}`
+        },
+        responseType: 'arraybuffer',
+        timeout: env.WHATSAPP_API_TIMEOUT
+      });
+
+      return Buffer.from(fileResponse.data);
+    } catch (error) {
+      logger.error('Error downloading WhatsApp audio:', { mediaId, error });
+      throw createError('Failed to download audio file', 500);
     }
   }
 }

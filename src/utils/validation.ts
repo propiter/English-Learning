@@ -1,110 +1,168 @@
-import Joi from 'joi';
+import { z } from 'zod';
 
-export const userRegistrationSchema = Joi.object({
-  telegramId: Joi.string().optional(),
-  whatsappId: Joi.string().optional(),
-  firstName: Joi.string().required().min(1).max(50),
-  lastName: Joi.string().optional().max(50),
-  username: Joi.string().optional().max(50),
-  language: Joi.string().optional().default('es'),
-  timezone: Joi.string().optional().default('UTC')
-}).or('telegramId', 'whatsappId');
-
-export const sessionCreationSchema = Joi.object({
-  userId: Joi.string().uuid().required(),
-  userInput: Joi.string().required(),
-  transcription: Joi.string().required(),
-  inputType: Joi.string().valid('audio', 'text').default('audio'),
-  evaluationJson: Joi.object().required(),
-  overallScore: Joi.number().min(0).max(100).required(),
-  pronunciation: Joi.number().min(0).max(100).optional(),
-  fluency: Joi.number().min(0).max(100).optional(),
-  grammar: Joi.number().min(0).max(100).optional(),
-  vocabulary: Joi.number().min(0).max(100).optional(),
-  duration: Joi.number().min(0).optional(),
-  wordsSpoken: Joi.number().min(0).optional(),
-  sessionType: Joi.string().valid('daily_practice', 'level_test', 'challenge').default('daily_practice'),
-  feedbackAudioUrl: Joi.string().uri().optional(),
-  feedbackText: Joi.string().optional()
+/**
+ * User registration validation schema
+ */
+export const userRegistrationSchema = z.object({
+  telegramId: z.string().optional(),
+  whatsappId: z.string().optional(),
+  firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
+  lastName: z.string().max(50, 'Last name too long').optional(),
+  username: z.string().max(50, 'Username too long').optional(),
+  language: z.string().length(2, 'Language must be 2 characters').default('es'),
+  timezone: z.string().default('UTC')
+}).refine(data => data.telegramId || data.whatsappId, {
+  message: 'Either telegramId or whatsappId must be provided'
 });
 
-export const userUpdateSchema = Joi.object({
-  firstName: Joi.string().min(1).max(50).optional(),
-  lastName: Joi.string().max(50).optional(),
-  cefrLevel: Joi.string().valid('A0', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2').optional(),
-  interests: Joi.array().items(Joi.string().max(30)).max(10).optional(),
-  learningGoal: Joi.string().max(100).optional(),
-  timezone: Joi.string().optional(),
-  language: Joi.string().optional(),
-  isOnboarding: Joi.boolean().optional(),
-  onboardingStep: Joi.string().optional()
+/**
+ * Session creation validation schema
+ */
+export const sessionCreationSchema = z.object({
+  userId: z.string().uuid('Invalid user ID format'),
+  userInput: z.string().min(1, 'User input is required'),
+  transcription: z.string().min(1, 'Transcription is required'),
+  inputType: z.enum(['audio', 'text']).default('audio'),
+  evaluationJson: z.record(z.any()),
+  overallScore: z.number().min(0).max(100),
+  pronunciation: z.number().min(0).max(100).optional(),
+  fluency: z.number().min(0).max(100).optional(),
+  grammar: z.number().min(0).max(100).optional(),
+  vocabulary: z.number().min(0).max(100).optional(),
+  duration: z.number().min(0).optional(),
+  wordsSpoken: z.number().min(0).optional(),
+  sessionType: z.enum(['daily_practice', 'level_test', 'challenge']).default('daily_practice'),
+  feedbackAudioUrl: z.string().url().optional(),
+  feedbackText: z.string().optional()
 });
 
-export const webhookSchema = Joi.object({
-  platform: Joi.string().valid('telegram', 'whatsapp').required(),
-  webhookData: Joi.object().required(),
-  signature: Joi.string().optional()
+/**
+ * User update validation schema
+ */
+export const userUpdateSchema = z.object({
+  firstName: z.string().min(1).max(50).optional(),
+  lastName: z.string().max(50).optional(),
+  cefrLevel: z.enum(['A0', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2']).optional(),
+  interests: z.array(z.string().max(30)).max(10).optional(),
+  learningGoal: z.string().max(100).optional(),
+  timezone: z.string().optional(),
+  language: z.string().length(2).optional(),
+  isOnboarding: z.boolean().optional(),
+  onboardingStep: z.string().optional()
 });
 
-// Webhook validation schemas
-export const telegramWebhookSchema = Joi.object({
-  update_id: Joi.number().required(),
-  message: Joi.object({
-    message_id: Joi.number().required(),
-    from: Joi.object({
-      id: Joi.number().required(),
-      is_bot: Joi.boolean().required(),
-      first_name: Joi.string().required(),
-      last_name: Joi.string().optional(),
-      username: Joi.string().optional(),
-      language_code: Joi.string().optional()
-    }).required(),
-    chat: Joi.object({
-      id: Joi.number().required(),
-      type: Joi.string().required()
-    }).required(),
-    date: Joi.number().required(),
-    text: Joi.string().optional(),
-    voice: Joi.object({
-      duration: Joi.number().required(),
-      mime_type: Joi.string().required(),
-      file_id: Joi.string().required(),
-      file_unique_id: Joi.string().required(),
-      file_size: Joi.number().optional()
+/**
+ * Telegram webhook validation schema
+ */
+export const telegramWebhookSchema = z.object({
+  update_id: z.number(),
+  message: z.object({
+    message_id: z.number(),
+    from: z.object({
+      id: z.number(),
+      is_bot: z.boolean(),
+      first_name: z.string(),
+      last_name: z.string().optional(),
+      username: z.string().optional(),
+      language_code: z.string().optional()
+    }),
+    chat: z.object({
+      id: z.number(),
+      type: z.string()
+    }),
+    date: z.number(),
+    text: z.string().optional(),
+    voice: z.object({
+      duration: z.number(),
+      mime_type: z.string(),
+      file_id: z.string(),
+      file_unique_id: z.string(),
+      file_size: z.number().optional()
     }).optional()
   }).optional()
 });
 
-export const whatsappWebhookSchema = Joi.object({
-  object: Joi.string().valid('whatsapp_business_account').required(),
-  entry: Joi.array().items(
-    Joi.object({
-      id: Joi.string().required(),
-      changes: Joi.array().items(
-        Joi.object({
-          value: Joi.object({
-            messaging_product: Joi.string().valid('whatsapp').required(),
-            metadata: Joi.object().required(),
-            contacts: Joi.array().optional(),
-            messages: Joi.array().items(
-              Joi.object({
-                from: Joi.string().required(),
-                id: Joi.string().required(),
-                timestamp: Joi.string().required(),
-                type: Joi.string().valid('text', 'audio', 'image', 'video', 'document').required(),
-                text: Joi.object({
-                  body: Joi.string().required()
+/**
+ * WhatsApp webhook validation schema
+ */
+export const whatsappWebhookSchema = z.object({
+  object: z.literal('whatsapp_business_account'),
+  entry: z.array(
+    z.object({
+      id: z.string(),
+      changes: z.array(
+        z.object({
+          value: z.object({
+            messaging_product: z.literal('whatsapp'),
+            metadata: z.record(z.any()),
+            contacts: z.array(z.record(z.any())).optional(),
+            messages: z.array(
+              z.object({
+                from: z.string(),
+                id: z.string(),
+                timestamp: z.string(),
+                type: z.enum(['text', 'audio', 'image', 'video', 'document']),
+                text: z.object({
+                  body: z.string()
                 }).optional(),
-                audio: Joi.object({
-                  id: Joi.string().required(),
-                  mime_type: Joi.string().optional()
+                audio: z.object({
+                  id: z.string(),
+                  mime_type: z.string().optional()
                 }).optional()
               })
             ).optional()
-          }).required(),
-          field: Joi.string().valid('messages').required()
+          }),
+          field: z.literal('messages')
         })
-      ).required()
+      )
     })
-  ).required()
+  )
 });
+
+/**
+ * Onboarding step validation schema
+ */
+export const onboardingStepSchema = z.object({
+  userId: z.string().uuid(),
+  input: z.string().min(1),
+  currentStep: z.enum(['welcome', 'level_test', 'interests', 'goal']),
+  platform: z.enum(['telegram', 'whatsapp'])
+});
+
+/**
+ * Audio file validation
+ */
+export const audioFileSchema = z.object({
+  fileId: z.string().min(1),
+  mimeType: z.string().regex(/^audio\/(mp3|wav|ogg|m4a|mpeg|x-wav)$/),
+  fileSize: z.number().max(10 * 1024 * 1024), // 10MB max
+  duration: z.number().min(1).max(300) // 1 second to 5 minutes
+});
+
+/**
+ * Validate request body with schema
+ */
+export const validateRequestBody = <T>(schema: z.ZodSchema<T>) => {
+  return (data: unknown): T => {
+    try {
+      return schema.parse(data);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const errorMessages = error.errors.map(err => `${err.path.join('.')}: ${err.message}`);
+        throw new Error(`Validation failed: ${errorMessages.join(', ')}`);
+      }
+      throw error;
+    }
+  };
+};
+
+/**
+ * Sanitize user input to prevent XSS and injection attacks
+ */
+export const sanitizeInput = (input: string): string => {
+  return input
+    .replace(/[<>]/g, '') // Remove potential HTML tags
+    .replace(/javascript:/gi, '') // Remove javascript: protocol
+    .replace(/on\w+=/gi, '') // Remove event handlers
+    .trim();
+};

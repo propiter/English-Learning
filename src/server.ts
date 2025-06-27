@@ -3,11 +3,16 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import compression from 'compression';
-import dotenv from 'dotenv';
+
+// Import configuration
+import env from './config/environment.js';
+import redisManager from './config/redis.js';
 
 // Import middleware
-import { errorHandler } from './middleware/errorHandler.js';
-import { logger } from './utils/logger.js';
+import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
+import { apiLimiter, speedLimiter } from './middleware/rateLimiter.js';
+import { securityHeaders, requestId, validateContentType, sanitizeBody } from './middleware/security.js';
+import { logger, logRequest } from './utils/logger.js';
 
 // Import routes
 import userRoutes from './modules/users/routes.js';
@@ -17,17 +22,39 @@ import contentRoutes from './modules/content/routes.js';
 import gatewayRoutes from './modules/gateway/routes.js';
 import onboardingRoutes from './modules/onboarding/routes.js';
 
-// Load environment variables
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Security middleware
-app.use(helmet());
+/**
+ * Trust proxy for accurate IP addresses behind load balancers
+ */
+app.set('trust proxy', 1);
 
-// CORS configuration - more secure
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000', 'http://localhost:5173'];
+/**
+ * Security middleware
+ */
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
+
+app.use(securityHeaders);
+app.use(requestId);
+
+/**
+ * CORS configuration
+ */
+const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim());
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, etc.)
@@ -36,43 +63,117 @@ app.use(cors({
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     } else {
+      logger.warn('CORS blocked request', { origin, allowedOrigins });
       return callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Request-ID']
 }));
 
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
+/**
+ * Rate limiting
+ */
+app.use('/api/', apiLimiter);
+app.use('/api/', speedLimiter);
+
+/**
+ * Body parsing middleware
+ */
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    // Store raw body for webhook signature verification
+    (req as any).rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Compression middleware
-app.use(compression());
+/**
+ * Content validation and sanitization
+ */
+app.use(validateContentType);
+app.use(sanitizeBody);
 
-// Logging middleware
-app.use(morgan('combined', {
-  stream: { write: (message) => logger.info(message.trim()) }
+/**
+ * Compression middleware
+ */
+app.use(compression({
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+  level: 6,
+  threshold: 1024
 }));
 
-// Request ID middleware for better debugging
+/**
+ * Logging middleware
+ */
+app.use(morgan('combined', {
+  stream: { 
+    write: (message) => {
+      // Parse morgan log and extract useful information
+      const logData = message.trim();
+      logger.info('HTTP Request', { raw: logData });
+    }
+  },
+  skip: (req, res) => {
+    // Skip logging for health checks in production
+    return process.env.NODE_ENV === 'production' && req.url === '/health';
+  }
+}));
+
+/**
+ * Request timing middleware
+ */
 app.use((req, res, next) => {
-  req.id = Math.random().toString(36).substr(2, 9);
-  res.setHeader('X-Request-ID', req.id);
+  const startTime = Date.now();
+  
+  res.on('finish', () => {
+    const responseTime = Date.now() - startTime;
+    logRequest(req, res, responseTime);
+  });
+  
   next();
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
+/**
+ * Health check endpoint
+ */
+app.get('/health', async (req, res) => {
+  const healthCheck = {
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
+    environment: env.NODE_ENV,
     version: process.env.npm_package_version || '1.0.0',
-    requestId: req.id
-  });
+    requestId: req.id,
+    services: {
+      database: 'unknown',
+      redis: redisManager.isReady() ? 'healthy' : 'unhealthy'
+    }
+  };
+
+  // Check database connection
+  try {
+    const { default: prisma } = await import('./config/database.js');
+    await prisma.$queryRaw`SELECT 1`;
+    healthCheck.services.database = 'healthy';
+  } catch (error) {
+    healthCheck.services.database = 'unhealthy';
+    healthCheck.status = 'degraded';
+  }
+
+  const statusCode = healthCheck.status === 'healthy' ? 200 : 503;
+  res.status(statusCode).json(healthCheck);
 });
 
-// API routes
+/**
+ * API routes
+ */
 app.use('/api/users', userRoutes);
 app.use('/api/learning', learningRoutes);
 app.use('/api/orchestrator', orchestratorRoutes);
@@ -80,42 +181,88 @@ app.use('/api/content', contentRoutes);
 app.use('/api/gateway', gatewayRoutes);
 app.use('/api/onboarding', onboardingRoutes);
 
-// Root endpoint
+/**
+ * Root endpoint
+ */
 app.get('/', (req, res) => {
   res.json({
     message: 'English Learning SaaS API',
-    version: '1.0.0',
+    version: process.env.npm_package_version || '1.0.0',
+    environment: env.NODE_ENV,
     documentation: '/api/docs',
     health: '/health',
+    requestId: req.id,
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * API documentation endpoint
+ */
+app.get('/api/docs', (req, res) => {
+  res.json({
+    title: 'English Learning SaaS API Documentation',
+    version: '1.0.0',
+    endpoints: {
+      users: {
+        'POST /api/users/register': 'Register new user',
+        'GET /api/users/:id': 'Get user profile',
+        'PUT /api/users/:id': 'Update user profile',
+        'GET /api/users/:id/progress': 'Get user progress'
+      },
+      learning: {
+        'POST /api/learning/sessions': 'Create learning session',
+        'GET /api/learning/users/:userId/sessions': 'Get session history',
+        'GET /api/learning/users/:userId/analytics': 'Get learning analytics'
+      },
+      gateway: {
+        'POST /api/gateway/webhook/telegram': 'Telegram webhook',
+        'POST /api/gateway/webhook/whatsapp': 'WhatsApp webhook'
+      },
+      content: {
+        'GET /api/content/prompts': 'Get AI prompts',
+        'GET /api/content/daily-topic': 'Get daily practice topic'
+      }
+    },
     requestId: req.id
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: {
-      message: 'Route not found',
-      path: req.originalUrl,
-      requestId: req.id
-    }
-  });
-});
+/**
+ * 404 handler
+ */
+app.use('*', notFoundHandler);
 
-// Global error handler (must be last)
+/**
+ * Global error handler (must be last)
+ */
 app.use(errorHandler);
 
-// Graceful shutdown handlers
-const gracefulShutdown = (signal: string) => {
+/**
+ * Graceful shutdown handlers
+ */
+const gracefulShutdown = async (signal: string) => {
   logger.info(`${signal} received, shutting down gracefully`);
   
   // Close server
-  server.close(() => {
+  server.close(async () => {
     logger.info('HTTP server closed');
     
-    // Close database connections, etc.
-    process.exit(0);
+    try {
+      // Close database connections
+      const { default: prisma } = await import('./config/database.js');
+      await prisma.$disconnect();
+      logger.info('Database disconnected');
+      
+      // Close Redis connection
+      await redisManager.disconnect();
+      logger.info('Redis disconnected');
+      
+      process.exit(0);
+    } catch (error) {
+      logger.error('Error during graceful shutdown:', error);
+      process.exit(1);
+    }
   });
   
   // Force close after 10 seconds
@@ -128,26 +275,45 @@ const gracefulShutdown = (signal: string) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Unhandled promise rejection handler
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit the process in production, just log the error
-  if (process.env.NODE_ENV !== 'production') {
+/**
+ * Initialize services and start server
+ */
+async function startServer() {
+  try {
+    // Connect to Redis
+    await redisManager.connect();
+    
+    // Start server
+    const server = app.listen(env.PORT, () => {
+      logger.info('🚀 Server started successfully', {
+        port: env.PORT,
+        environment: env.NODE_ENV,
+        nodeVersion: process.version,
+        pid: process.pid
+      });
+      
+      if (env.NODE_ENV === 'development') {
+        logger.info('📊 Development URLs:', {
+          api: `http://localhost:${env.PORT}`,
+          health: `http://localhost:${env.PORT}/health`,
+          docs: `http://localhost:${env.PORT}/api/docs`
+        });
+      }
+    });
+
+    // Set server timeout
+    server.timeout = 30000; // 30 seconds
+    server.keepAliveTimeout = 65000; // 65 seconds
+    server.headersTimeout = 66000; // 66 seconds
+
+    return server;
+  } catch (error) {
+    logger.error('Failed to start server:', error);
     process.exit(1);
   }
-});
+}
 
-// Uncaught exception handler
-process.on('uncaughtException', (error) => {
-  logger.error('Uncaught Exception:', error);
-  process.exit(1);
-});
-
-// Start server
-const server = app.listen(PORT, () => {
-  logger.info(`🚀 Server running on port ${PORT}`);
-  logger.info(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  logger.info(`🔗 Health check: http://localhost:${PORT}/health`);
-});
+// Start the server
+const server = await startServer();
 
 export default app;

@@ -1,5 +1,210 @@
-For all designs I ask you to make, have them be beautiful, not cookie cutter. Make webpages that are fully featured and worthy for production.
+# ROL Y OBJETIVO
+Actúa como un arquitecto de software y desarrollador Full-Stack experto. Tu tarea es diseñar y generar el código completo del backend para una plataforma SaaS de aprendizaje de inglés conversacional. La plataforma interactúa con los usuarios a través de Telegram y WhatsApp, y utiliza un sistema de IA para proporcionar feedback personalizado.
 
-By default, this template supports JSX syntax with Tailwind CSS classes, React hooks, and Lucide React for icons. Do not install other packages for UI themes, icons, etc unless absolutely necessary or I request them.
+# VISIÓN GENERAL DEL PRODUCTO
+El usuario envía un mensaje de voz en inglés. El backend lo procesa, lo evalúa usando una API externa, y utiliza un LLM para generar un feedback pedagógico en dos formatos: un mensaje de audio explicativo y un resumen en texto. El sistema debe ser multi-nivel (MCER A1-C2), personalizado según los intereses del usuario y gamificado para mantener el engagement.
 
-Use icons from lucide-react for logos.
+# TECH STACK
+- **Lenguaje:** Node.js con TypeScript
+- **Framework:** Express.js
+- **Base de Datos:** PostgreSQL
+- **ORM:** Prisma
+- **Autenticación:** JWT (para el futuro dashboard web)
+- **Contenerización:** Docker
+
+# DISEÑO DE LA BASE DE DATOS (SCHEMA DE PRISMA)
+Genera el `schema.prisma` con las siguientes tablas y relaciones:
+
+model User {
+  id              String   @id @default(uuid())
+  telegramId      String?  @unique
+  whatsappId      String?  @unique
+  firstName       String
+  cefrLevel       String   @default("A0") // A0, A1, A2, B1, B2, C1, C2
+  xp              Int      @default(0)
+  streak          Int      @default(0)
+  interests       String[] // e.g., ["technology", "movies"]
+  learningGoal    String?  // e.g., "business", "travel"
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  subscription    Subscription?
+  sessions        Session[]
+}
+
+model Subscription {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+  plan            String   // "free", "premium", "pro"
+  status          String   // "active", "canceled", "past_due"
+  stripeCustomerId String?
+  endsAt          DateTime?
+}
+
+model Session {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  userInput       String
+  transcription   String
+  evaluationJson  Json     // El JSON completo de la API de evaluación
+  feedbackAudioUrl String? // URL al audio de feedback generado
+  feedbackText    String?  // El texto de resumen generado
+  overallScore    Float
+  createdAt       DateTime @default(now())
+}
+
+model Prompt {
+  id              String   @id @default(uuid())
+  cefrLevel       String   // Nivel para el que aplica este prompt
+  promptType      String   // "daily_practice", "onboarding", "evaluation_test"
+  systemMessage   String
+}
+
+# ARQUITECTURA MODULAR
+Genera el código organizado en los siguientes módulos (carpetas):
+
+### 1. User & Auth Core (`/src/modules/users`)
+- **Propósito:** Gestionar todo lo relacionado con el usuario.
+- **Responsabilidades:**
+  - `POST /users/register`: Crea un nuevo usuario a partir de un `telegramId` o `whatsappId`. Inicia el flujo de onboarding.
+  - `GET /users/:id`: Obtiene el perfil completo de un usuario (nivel, XP, etc.).
+  - `PUT /users/:id/update`: Actualiza datos del usuario (nivel, intereses, etc.).
+  - Lógica para identificar si un usuario que envía un mensaje ya existe o es nuevo.
+
+### 2. Learning & Progress Engine (`/src/modules/learning`)
+- **Propósito:** Gestionar la lógica educativa.
+- **Responsabilidades:**
+  - `POST /sessions/create`: Guarda una nueva sesión de práctica para un usuario.
+  - `GET /users/:id/progress`: Devuelve el historial de progreso y métricas para el dashboard.
+  - Lógica para actualizar XP y rachas después de cada sesión.
+  - Lógica para determinar si un usuario es elegible para una evaluación de nivel (ej: después de N sesiones en un nivel con >80% de score promedio).
+
+### 3. AI Agent Orchestrator (`/src/modules/orchestrator`)
+- **Propósito:** El cerebro que dirige la interacción principal.
+- **Responsabilidades:**
+  - Función `handleUserMessage(userId, userAudioInput)`:
+    1. Llama al `User & Auth Core` para obtener el perfil del usuario.
+    2. Llama a un servicio de Speech-to-Text para transcribir el audio.
+    3. Llama a la API de evaluación externa con la transcripción.
+    4. Consulta el `Content & Prompts Manager` para obtener el `systemMessage` correcto según el `cefrLevel` del usuario.
+    5. Llama al LLM (OpenAI, Anthropic, etc.) con el prompt del "Profesor Alex" para generar el audio de feedback.
+    6. Llama al LLM con el prompt del "Reportero" para generar el resumen de texto.
+    7. Llama al `Messaging Gateway` para enviar los dos mensajes al usuario.
+    8. Llama al `Learning & Progress Engine` para registrar la sesión y actualizar XP/racha.
+
+### 4. Content & Prompts Manager (`/src/modules/content`)
+- **Propósito:** Servir el contenido correcto.
+- **Responsabilidades:**
+  - `GET /prompts?level=A2&type=daily_practice`: Devuelve el prompt del sistema para un usuario de nivel A2 en una práctica diaria.
+  - Inicialmente, los prompts pueden estar en un archivo JSON o directamente en la DB. La función debe obtenerlos de allí.
+
+### 5. Messaging Gateway (`/src/modules/gateway`)
+- **Propósito:** Interactuar con las APIs de mensajería.
+- **Responsabilidades:**
+  - `POST /webhook/telegram`: Endpoint para recibir los webhooks de Telegram.
+  - `POST /webhook/whatsapp`: Endpoint para recibir los webhooks de WhatsApp.
+  - Función `sendMessage(userId, text, audioUrl)` que internamente determina si debe usar la API de Telegram o WhatsApp.
+
+### 6. Onboarding & Evaluation Engine (`/src/modules/onboarding`)
+- **Propósito:** Gestionar flujos de conversación específicos.
+- **Responsabilidades:**
+  - Lógica de máquina de estados para el test de nivel inicial. Hace una serie de 3-5 preguntas de dificultad creciente, evalúa las respuestas y asigna un `cefrLevel` inicial al usuario.
+  - Lógica similar para las pruebas de ascenso de nivel.
+
+# FLUJOS DE TRABAJO PRINCIPALES
+
+**Flujo de Nuevo Usuario:**
+1. Usuario envía `/start` a través del `Messaging Gateway`.
+2. El Orchestrator detecta que es un usuario nuevo (consulta al `User Core`).
+3. El `User Core` crea el usuario en la DB con nivel "A0".
+4. El Orchestrator activa el `Onboarding Engine`.
+5. El Onboarding Engine envía el mensaje de bienvenida y comienza el test de nivel.
+6. Al finalizar, el Onboarding Engine calcula el nivel (ej: "B1") y actualiza el perfil del usuario a través del `User Core`.
+7. El usuario está listo para su primera práctica normal.
+
+**Flujo de Práctica Diaria:**
+1. Usuario envía mensaje de voz.
+2. El `Messaging Gateway` lo recibe y lo pasa al `Orchestrator`.
+3. El `Orchestrator` ejecuta su lógica (transcribir, evaluar, obtener prompt, generar feedback audio/texto, enviar mensajes, guardar sesión).
+
+# INSTRUCCIONES FINALES
+Genera una estructura de carpetas y archivos completa y lógica para este proyecto en Node.js/TypeScript. Incluye un `Dockerfile` y `docker-compose.yml` para un entorno de desarrollo local con la base de datos PostgreSQL. Escribe un `README.md` detallado explicando cómo configurar e iniciar el proyecto. El código debe ser de alta calidad, modular, y seguir las mejores prácticas de desarrollo de software.
+
+
+# ROL Y OBJETIVO
+Actúa como un Ingeniero de QA (Quality Assurance) y Arquitecto de Software senior. Tu misión es realizar una auditoría exhaustiva y un análisis funcional del código de backend de una plataforma SaaS de aprendizaje de inglés. Debes verificar que la arquitectura sea sólida, que no haya errores lógicos y, lo más importante, que todos los flujos de usuario, desde el registro hasta la práctica diaria, se cumplan a la perfección según las especificaciones. No solo debes encontrar errores, sino también validar que la lógica de negocio esté correctamente implementada.
+
+# CONTEXTO DEL ANÁLISIS
+Se te proporcionará (o debes asumir que tienes acceso a) el código completo del backend, desarrollado en Node.js/TypeScript con Express, PostgreSQL y Prisma, y organizado en los módulos previamente definidos (User & Auth, Learning Engine, Orchestrator, etc.). Tu análisis debe considerar la interacción entre estos módulos como el punto más crítico de posibles fallos.
+
+# PROCESO DE AUDITORÍA (OBLIGATORIO)
+Debes seguir este proceso de análisis en 3 fases para asegurar una cobertura completa.
+
+### Fase 1: Revisión Estática de Código y Arquitectura
+Antes de simular flujos, realiza una revisión del código en reposo. Busca específicamente:
+- **Manejo de Errores:** ¿Están todas las llamadas a la base de datos (Prisma) y a APIs externas (Evaluación, LLM) dentro de bloques `try...catch`? ¿Existe un middleware de manejo de errores global en Express? ¿Qué sucede si una promesa no es resuelta (`unhandled promise rejection`)?
+- **Validación de Entradas:** ¿Se validan los datos que llegan de los webhooks de Telegram/WhatsApp? ¿Qué pasa si llega un formato inesperado?
+- **Gestión de Estado:** ¿Cómo se maneja el estado de una conversación de onboarding o evaluación? Si el usuario no responde a una pregunta del test de nivel, ¿el sistema queda en un estado de bloqueo? ¿Hay timeouts?
+- **Seguridad:** ¿Están las claves de API, secretos de JWT y credenciales de la base de datos gestionadas a través de variables de entorno (`.env`) y no hardcodeadas?
+- **Lógica Asíncrona:** Verifica el uso correcto de `async/await`. ¿Hay posibles "race conditions" donde una operación de base de datos pueda ocurrir antes de que otra necesaria haya terminado?
+
+### Fase 2: Simulación y Verificación de Flujos End-to-End
+Esta es la fase más importante. Describe, paso a paso, cómo el sistema debería reaccionar a los siguientes escenarios. "Traza" el flujo de datos y llamadas entre módulos para cada uno y verifica si la lógica del código lo soporta.
+
+**Escenario 1: El Viaje del Nuevo Usuario (Onboarding)**
+1.  **Activador:** Un usuario, identificado por un `telegramId` que **NO** existe en la tabla `User`, envía el comando `/start`.
+2.  **Verificación del Flujo:**
+    - ¿El `Messaging Gateway` recibe el webhook y extrae el `telegramId`?
+    - ¿El `Orchestrator` llama al `User & Auth Core` para verificar la existencia del usuario?
+    - Al no encontrarlo, ¿el `User & Auth Core` crea una nueva entrada en la tabla `User` con `cefrLevel: "A0"` y los datos básicos?
+    - ¿El `Orchestrator` delega el control al `Onboarding & Evaluation Engine`?
+    - ¿El `Onboarding Engine` envía el mensaje de bienvenida (bilingüe o no) y la primera pregunta del test de nivel a través del `Messaging Gateway`?
+3.  **Resultado Esperado:** Confirma que el código implementa esta secuencia sin fisuras. La base de datos debe reflejar un nuevo usuario, y la respuesta correcta debe ser enviada.
+
+**Escenario 2: La Práctica de un Usuario Existente**
+1.  **Activador:** Un usuario con `telegramId` existente (ej: `cefrLevel: "B1"`, `interests: ["movies"]`) envía un mensaje de voz.
+2.  **Verificación del Flujo:**
+    - ¿El `Orchestrator` identifica correctamente al usuario existente y recupera su perfil completo?
+    - ¿El `Orchestrator` consulta al `Content & Prompts Manager` para obtener el `systemMessage` específico para el nivel `B1`?
+    - ¿El `Orchestrator` pasa el `systemMessage` y los intereses del usuario (`movies`) al LLM para contextualizar la conversación de feedback?
+    - Después de recibir las respuestas de la IA (audio y texto), ¿el `Orchestrator` llama al `Learning & Progress Engine` para registrar la sesión en la tabla `Session`?
+    - ¿El `Learning & Progress Engine` actualiza correctamente los `xp` y la `streak` del usuario en la tabla `User`?
+3.  **Resultado Esperado:** Confirma que la personalización (nivel e intereses) se aplica correctamente y que el progreso del usuario se guarda de forma persistente después de cada interacción.
+
+**Escenario 3: La Falla de un Servicio Externo (Caso de Borde)**
+1.  **Activador:** Un usuario existente envía un mensaje de voz. El flujo comienza como en el Escenario 2, pero la llamada a la API de evaluación externa falla (devuelve un error 500 o un timeout).
+2.  **Verificación del Flujo:**
+    - ¿El bloque `try...catch` en el `Orchestrator` captura este error específico?
+    - ¿El sistema evita "colgarse" o crashear?
+    - ¿Se envía un mensaje de error amigable al usuario (ej: "Lo siento, estamos teniendo problemas para analizar tu audio en este momento. Por favor, inténtalo de nuevo en unos minutos.")?
+    - ¿Se evita registrar una sesión incompleta en la base de datos o se registra con un estado de "fallida"?
+3.  **Resultado Esperado:** El sistema debe ser resiliente. Una falla en un microservicio o API externa no debe derribar toda la aplicación ni dejar al usuario sin respuesta.
+
+### Fase 3: Estrategia de Pruebas
+Basado en tu análisis, define una estrategia de pruebas. No escribas el código de las pruebas, pero sí los casos que deben ser cubiertos.
+- **Pruebas Unitarias:** Lista 5 funciones clave que necesiten pruebas unitarias (ej: la función que calcula el nivel a partir de los scores del test; la función que actualiza la racha).
+- **Pruebas de Integración:** Lista 3 interacciones clave entre módulos que deban ser probadas (ej: `Orchestrator` -> `User Core` -> `Content Manager`).
+
+# FORMATO DEL REPORTE DE SALIDA
+Presenta tu auditoría en un reporte estructurado y accionable:
+
+**## 1. Resumen Ejecutivo**
+- Un párrafo que resuma la salud general del backend, el nivel de preparación para producción y los riesgos principales.
+
+**## 2. Análisis de Flujos de Usuario**
+- Para cada uno de los 3 escenarios simulados, detalla:
+  - **Confirmación:** "El flujo se cumple correctamente." O "El flujo está roto/incompleto."
+  - **Brecha/Error Encontrado:** Describe cualquier desviación del comportamiento esperado. Incluye el módulo y el archivo donde se encuentra el problema.
+  - **Sugerencia de Corrección:** Proporciona una solución o fragmento de código para arreglarlo.
+
+**## 3. Catálogo de Hallazgos (Bugs y Mejoras)**
+- Una lista priorizada de otros problemas encontrados durante la Fase 1.
+  - **Prioridad (Crítica/Alta/Media/Baja)**
+  - **Descripción del Problema** (ej: "Clave de API de OpenAI hardcodeada en `orchestrator.ts`").
+  - **Riesgo Asociado** (ej: "Riesgo de seguridad severo").
+  - **Solución Sugerida.**
+
+**## 4. Plan de Pruebas Recomendado**
+- La lista de casos de pruebas unitarias y de integración que definiste en la Fase 3.
