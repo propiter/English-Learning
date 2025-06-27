@@ -1,14 +1,20 @@
 import prisma from '../../config/database.js';
 import { logger } from '../../utils/logger.js';
-import { CEFR_LEVELS, OnboardingState } from '../../types/index.js';
+import { CEFR_LEVELS } from '../../types/index.js';
 import { createError } from '../../middleware/errorHandler.js';
-import axios from 'axios';
+import { messagingGatewayService } from '../gateway/service.js';
+import { Platform } from '../../types/index.js';
+
+// Using Platform type from types/index.js
 
 export class OnboardingService {
-  private readonly baseURL = process.env.API_BASE_URL || 'http://localhost:3000';
-  private readonly internalApiKey = process.env.INTERNAL_API_KEY!;
+  // Removed unused constants
 
-  async processOnboardingStep(userId: string, input: string, currentStep: string, platform: string) {
+  async processOnboardingStep(userId: string, input: string, currentStep: string, platform: Platform) {
+    // Ensure platform is either 'telegram' or 'whatsapp'
+    if (platform !== 'telegram' && platform !== 'whatsapp') {
+      throw new Error(`Unsupported platform: ${platform}`);
+    }
     try {
       const user = await prisma.user.findUnique({ where: { id: userId } });
       if (!user) {
@@ -39,7 +45,10 @@ export class OnboardingService {
     }
   }
 
-  private async handleWelcomeStep(user: any, input: string, platform: string) {
+  private async handleWelcomeStep(user: any, _input: string, platform: Platform) {
+    if (!user.firstName) {
+      user.firstName = 'there';
+    }
     // Send welcome message and start level test
     const welcomeMessage = `¡Hola ${user.firstName}! 👋 
 
@@ -67,7 +76,7 @@ Ready? Let's start with an easy one:
     };
   }
 
-  private async handleLevelTestStep(user: any, input: string, platform: string) {
+  private async handleLevelTestStep(user: any, _input: string, platform: Platform) {
     // Get current test state
     const testState = this.getTestStateFromUser(user);
     const questions = testState.testQuestions || this.getLevelTestQuestions();
@@ -154,7 +163,7 @@ Just tell me 2-3 topics you'd like to practice English with!`;
     }
   }
 
-  private async handleInterestsStep(user: any, input: string, platform: string) {
+  private async handleInterestsStep(user: any, _input: string, platform: Platform) {
     // Mock transcription for development
     const transcription = input.includes('mock')
       ? "I'm interested in technology, movies, and sports"
@@ -195,7 +204,7 @@ Or tell me your specific goal!`;
     };
   }
 
-  private async handleGoalStep(user: any, input: string, platform: string) {
+  private async handleGoalStep(user: any, _input: string, platform: Platform) {
     // Mock transcription for development
     const transcription = input.includes('mock')
       ? "My goal is career advancement and business communication"
@@ -398,7 +407,7 @@ Ready to start your first practice session? Send me a voice message about any to
     return levelData ? levelData.description : 'English learner';
   }
 
-  private getTestStateFromUser(user: any): any {
+  private getTestStateFromUser(_user: any): any {
     // In a real implementation, this would be stored in Redis or database
     // For now, we'll use a simple approach
     return {
@@ -408,7 +417,7 @@ Ready to start your first practice session? Send me a voice message about any to
     };
   }
 
-  private async updateUserOnboardingStep(userId: string, step: string, data?: any) {
+  private async updateUserOnboardingStep(userId: string, step: string, _data?: any) {
     await prisma.user.update({
       where: { id: userId },
       data: {
@@ -421,23 +430,24 @@ Ready to start your first practice session? Send me a voice message about any to
     logger.info(`Updated onboarding step for user ${userId}: ${step}`);
   }
 
-  private async transcribeAudio(audioInput: string): Promise<string> {
+  private async transcribeAudio(_audioInput: string): Promise<string> {
     // Mock transcription - in production, this would call OpenAI Whisper
     return "This is a mock transcription of the user's audio input for development purposes.";
   }
 
-  private async sendMessage(userId: string, platform: string, audioUrl?: string, text?: string) {
+  private async sendMessage(userId: string, platform: Platform, audioUrl?: string, text?: string) {
+    if (!text && !audioUrl) {
+      logger.warn('No content provided for message');
+      return;
+    }
     try {
-      await axios.post(`${this.baseURL}/api/gateway/send-message`, {
-        userId,
-        platform,
-        audioUrl,
-        text
-      }, {
-        headers: { 'x-api-key': this.internalApiKey }
-      });
+      logger.info(`Sending message to user ${userId} on ${platform}`, { audioUrl, text: text ? `${text.substring(0, 50)}...` : 'No text' });
+      await messagingGatewayService.sendMessage(userId, platform, audioUrl, text);
+      logger.info(`Successfully sent message to user ${userId} on ${platform}`);
     } catch (error) {
       logger.error('Error sending onboarding message:', error);
+      // Re-throw the error to be handled by the caller
+      throw error;
     }
   }
 }

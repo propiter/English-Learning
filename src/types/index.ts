@@ -1,3 +1,5 @@
+export type Platform = 'telegram' | 'whatsapp';
+
 export interface User {
   id: string;
   telegramId?: string;
@@ -71,7 +73,7 @@ export interface EvaluationResponse {
 
 export interface MessagePayload {
   userId: string;
-  platform: 'telegram' | 'whatsapp';
+  platform: Platform;
   messageType: 'text' | 'audio';
   content: string; // Text content or audio file path
   chatId: string;
