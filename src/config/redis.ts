@@ -10,23 +10,28 @@ class RedisManager {
   private isConnected: boolean = false;
 
   constructor() {
-    this.client = createClient({
+    const redisOptions = {
       url: env.REDIS_URL,
       socket: {
-        connectTimeout: 10000,
-        reconnectStrategy: (retries) => {
-          if (retries > 10) {
+        connectTimeout: 5000, // 5 seconds
+        reconnectStrategy: (retries: number): number | Error => {
+          if (retries > 5) {
             logger.error('Redis: Maximum reconnection attempts reached');
-            return false;
+            return new Error('Max retries reached');
           }
-          const delay = Math.min(retries * 100, 3000);
+          const delay = Math.min(retries * 100, 2000);
           logger.warn(`Redis: Reconnecting in ${delay}ms (attempt ${retries})`);
           return delay;
         }
-      },
-      lazyConnect: true
+      }
+    };
+
+    logger.debug('Initializing Redis client with options:', { 
+      host: new URL(env.REDIS_URL).hostname,
+      port: new URL(env.REDIS_URL).port 
     });
 
+    this.client = createClient(redisOptions);
     this.setupEventHandlers();
   }
 
@@ -35,17 +40,50 @@ class RedisManager {
    */
   private setupEventHandlers(): void {
     this.client.on('connect', () => {
-      logger.info('Redis: Connecting...');
+      logger.info('Redis: Connecting to server...');
     });
 
     this.client.on('ready', () => {
       this.isConnected = true;
       logger.info('Redis: Connected and ready');
+      
+      // Verify connection with a test command
+      this.client.ping()
+        .then(() => logger.debug('Redis: Ping successful'))
+        .catch(err => logger.error('Redis: Ping failed', { error: err.message }));
     });
 
     this.client.on('error', (err) => {
       this.isConnected = false;
-      logger.error('Redis: Connection error', { error: err.message });
+      const errorMessage = `Redis error: ${err.message}`;
+      
+      // Log different error types with appropriate levels
+      if (err.message.includes('ECONNREFUSED')) {
+        logger.error('Redis: Connection refused - Is the Redis server running?', { 
+          host: new URL(env.REDIS_URL).hostname,
+          port: new URL(env.REDIS_URL).port 
+        });
+      } else if (err.message.includes('ETIMEDOUT')) {
+        logger.error('Redis: Connection timed out - Check network connectivity', {
+          host: new URL(env.REDIS_URL).hostname,
+          port: new URL(env.REDIS_URL).port
+        });
+      } else {
+        logger.error('Redis: Connection error', { 
+          error: errorMessage,
+          code: (err as any).code,
+          stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+        });
+      }
+    });
+
+    this.client.on('reconnecting', () => {
+      logger.info('Redis: Reconnecting to server...');
+    });
+
+    this.client.on('end', () => {
+      this.isConnected = false;
+      logger.warn('Redis: Connection closed');
     });
 
     this.client.on('end', () => {
@@ -84,6 +122,37 @@ class RedisManager {
       }
     } catch (error) {
       logger.error('Redis: Failed to disconnect', { error });
+    }
+  }
+
+  async quit(): Promise<void> {
+    if (this.client) {
+      await this.client.quit();
+      this.isConnected = false;
+    }
+  }
+
+  /**
+   * Check if Redis connection is healthy
+   */
+  async checkHealth(): Promise<{ status: 'ok' | 'error'; error?: string }> {
+    try {
+      if (!this.client) {
+        return { status: 'error', error: 'Redis client not initialized' };
+      }
+
+      // Check if client is connected
+      if (!this.client.isOpen) {
+        return { status: 'error', error: 'Redis client not connected' };
+      }
+
+      // Test with a simple command
+      await this.client.ping();
+      return { status: 'ok' };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('Redis health check failed', { error: errorMessage });
+      return { status: 'error', error: errorMessage };
     }
   }
 

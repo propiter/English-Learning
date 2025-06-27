@@ -28,11 +28,25 @@ export class MessagingGatewayService {
         throw createError('Either audioUrl or text must be provided', 400);
       }
 
+      // --- FIX START: Fetch user to get platform-specific ID ---
+      const user = await userService.getUserById(userId);
+      if (!user) {
+        throw createError(`User not found for sending message: ${userId}`, 404);
+      }
+
+      const platformId = platform === 'telegram' ? user.telegramId : user.whatsappId;
+      if (!platformId) {
+        throw createError(`User ${userId} does not have a ${platform} ID.`, 400);
+      }
+      // --- FIX END ---
+
       let result;
       if (platform === 'telegram') {
-        result = await this._sendTelegramMessage(userId, audioUrl, text);
+        // Pass the correct platformId
+        result = await this._sendTelegramMessage(platformId, audioUrl, text);
       } else if (platform === 'whatsapp') {
-        result = await this._sendWhatsAppMessage(userId, audioUrl, text);
+        // Pass the correct platformId
+        result = await this._sendWhatsAppMessage(platformId, audioUrl, text);
       } else {
         throw createError(`Unsupported platform: ${platform}`, 400);
       }
@@ -81,7 +95,18 @@ export class MessagingGatewayService {
 
       return messages;
     } catch (error) {
-      logger.error('Error sending Telegram message:', { chatId, error });
+      // --- IMPROVEMENT START: Detailed error logging ---
+      if (axios.isAxiosError(error)) {
+        logger.error('Axios error sending Telegram message:', {
+          chatId,
+          status: error.response?.status,
+          data: error.response?.data,
+          message: error.message
+        });
+      } else {
+        logger.error('Generic error sending Telegram message:', { chatId, error });
+      }
+      // --- IMPROVEMENT END ---
       throw createError('Failed to send Telegram message', 500);
     }
   }
@@ -133,7 +158,18 @@ export class MessagingGatewayService {
 
       return messages;
     } catch (error) {
-      logger.error('Error sending WhatsApp message:', { phoneNumber, error });
+      // --- IMPROVEMENT START: Detailed error logging ---
+      if (axios.isAxiosError(error)) {
+        logger.error('Axios error sending WhatsApp message:', {
+          phoneNumber,
+          status: error.response?.status,
+          data: error.response?.data,
+          message: error.message
+        });
+      } else {
+        logger.error('Generic error sending WhatsApp message:', { phoneNumber, error });
+      }
+      // --- IMPROVEMENT END ---
       throw createError('Failed to send WhatsApp message', 500);
     }
   }
@@ -336,17 +372,17 @@ export class MessagingGatewayService {
   private async _processMessage(messageData: MessagePayload) {
     try {
       // Ensure user exists
-      await this._ensureUserExists(messageData);
+      const user = await this._ensureUserExists(messageData);
       
       // Forward to orchestrator for processing
       await orchestratorService.handleUserMessage(
-        messageData.userId,
+        user.id, // Pass the internal DB user ID
         messageData.content,
         messageData.platform,
         messageData
       );
 
-      logUserAction(messageData.userId, 'message_processed', { 
+      logUserAction(user.id, 'message_processed', { 
         platform: messageData.platform,
         messageType: messageData.messageType 
       });
@@ -372,26 +408,30 @@ export class MessagingGatewayService {
         messageData.userId
       );
 
-      if (!existingUser) {
-        // Create new user
-        const userData = {
-          [messageData.platform === 'telegram' ? 'telegramId' : 'whatsappId']: messageData.userId,
-          firstName: messageData.userData?.firstName || 'User',
-          lastName: messageData.userData?.lastName || '',
-          username: messageData.userData?.username || `user_${Date.now()}`,
-          language: 'es', // Default to Spanish
-          timezone: 'UTC'
-        };
-
-        const newUser = await userService.createUser(userData);
-        
-        logUserAction(newUser.id, 'user_created', { 
-          platform: messageData.platform,
-          source: 'webhook' 
-        });
-        
-        logger.info(`Created new user: ${newUser.id} for ${messageData.platform}`);
+      if (existingUser) {
+        return existingUser;
       }
+
+      // Create new user
+      const userData = {
+        [messageData.platform === 'telegram' ? 'telegramId' : 'whatsappId']: messageData.userId,
+        firstName: messageData.userData?.firstName || 'User',
+        lastName: messageData.userData?.lastName || '',
+        username: messageData.userData?.username || `user_${Date.now()}`,
+        language: 'es', // Default to Spanish
+        timezone: 'UTC'
+      };
+
+      const newUser = await userService.createUser(userData);
+      
+      logUserAction(newUser.id, 'user_created', { 
+        platform: messageData.platform,
+        source: 'webhook' 
+      });
+      
+      logger.info(`Created new user: ${newUser.id} for ${messageData.platform}`);
+      return newUser;
+
     } catch (error) {
       logger.error('Error ensuring user exists:', { 
         userId: messageData.userId,
