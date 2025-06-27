@@ -88,7 +88,7 @@ export class MessagingGatewayService {
         const payload = {
           chat_id: chatId,
           text: text,
-          parse_mode: 'Markdown'
+          //parse_mode: 'Markdown'
         };
 
         logger.info('Attempting to send Telegram text message', {

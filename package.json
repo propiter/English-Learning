@@ -13,7 +13,7 @@
     "format": "prettier --write .",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
-    "db:seed": "tsx src/prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts"
   },
   "keywords": [
     "nodejs",
