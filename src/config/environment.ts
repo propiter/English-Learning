@@ -49,9 +49,10 @@ const envSchema = z.object({
   RATE_LIMIT_WINDOW_MS: z.string().transform(Number).pipe(z.number().int().positive()).default('900000'),
   RATE_LIMIT_MAX_REQUESTS: z.string().transform(Number).pipe(z.number().int().positive()).default('100'),
   
-  // Audio processing
+  // Audio processing & Evaluation Logic
   MAX_AUDIO_FILE_SIZE_MB: z.string().transform(Number).pipe(z.number().int().positive()).default('10'),
   SUPPORTED_AUDIO_FORMATS: z.string().default('mp3,wav,ogg,m4a'),
+  EVALUATOR_MIN_WORD_COUNT: z.string().transform(Number).pipe(z.number().int().positive()).default('5'),
   
   // API timeouts
   OPENAI_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('60000'),

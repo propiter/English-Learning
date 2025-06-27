@@ -46,12 +46,28 @@ export class OrchestratorService {
       }
 
       if (user.isOnboarding) {
-        // FIX: Delegate to the actual onboarding service
         await onboardingService.processOnboardingStep(user.id, content, user.onboardingStep, platform);
-        return; // Onboarding service handles its own responses
+        return;
       }
 
-      return await this._processPracticeSessionResilient(user, inputType, content, platform, messageData);
+      // --- Get Transcription ---
+      const textInput = inputType === 'audio' ? await this._transcribeAudio(content, user.id) : content;
+
+      // --- Intent Classification & Word Count Check ---
+      const wordCount = this._countWords(textInput);
+      if (wordCount < env.EVALUATOR_MIN_WORD_COUNT) {
+        return this._handleShortResponse(user, platform);
+      }
+      
+      // TODO: Implement a more robust intent classifier. For now, we assume practice.
+      const intent = 'practice_session'; 
+
+      if (intent === 'meta_query') {
+        // return this._handleMetaQuery(user, textInput, platform);
+      }
+
+      // --- Default to Practice Session Flow ---
+      return await this._processPracticeSession(user, inputType, content, textInput, platform, messageData);
 
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -91,20 +107,9 @@ export class OrchestratorService {
   /**
    * Process practice session using an agent-driven, resilient flow.
    */
-  private async _processPracticeSessionResilient(user: User, inputType: 'text' | 'audio', content: string, platform: string, messageData: any) {
+  private async _processPracticeSession(user: User, inputType: 'text' | 'audio', originalContent: string, textToEvaluate: string, platform: string, messageData: any) {
     try {
-      // --- STEP 1: GET TRANSCRIPTION (if needed) ---
-      let textToEvaluate: string;
-      let originalTranscription: string | null = null;
-
-      if (inputType === 'audio') {
-        textToEvaluate = await this._transcribeAudio(content, user.id);
-        originalTranscription = textToEvaluate;
-      } else {
-        textToEvaluate = content;
-      }
-
-      // --- STEP 2: PREPARE DATA (External API Calls & Slow Operations) ---
+      // --- STEP 1: PREPARE DATA (External API Calls & Slow Operations) ---
       const evaluation = await this._evaluateWithAgent(textToEvaluate, user.cefrLevel, user.id);
       
       const [teacherPrompt, summaryPrompt] = await this._getPromptsWithFallback(user.cefrLevel);
@@ -119,11 +124,11 @@ export class OrchestratorService {
 
       const xpEarned = this._calculateXp(evaluation.overall, user.cefrLevel);
 
-      // --- STEP 3: ATOMIC DATABASE WRITE (Quick Transaction) ---
+      // --- STEP 2: ATOMIC DATABASE WRITE (Quick Transaction) ---
       const sessionData = {
         userId: user.id,
-        userInput: content,
-        transcription: originalTranscription,
+        userInput: originalContent,
+        transcription: inputType === 'audio' ? textToEvaluate : null,
         inputType: inputType,
         evaluationJson: evaluation,
         overallScore: evaluation.overall,
@@ -145,7 +150,7 @@ export class OrchestratorService {
         return createdSession;
       });
 
-      // --- STEP 4: POST-TRANSACTION ACTIONS (Non-blocking) ---
+      // --- STEP 3: POST-TRANSACTION ACTIONS (Non-blocking) ---
       setImmediate(() => this._sendFeedbackToUser(user.id, platform, audioFeedbackUrl, textSummary));
       setImmediate(() => this._checkLevelUpEligibility(user.id));
 
@@ -173,6 +178,25 @@ export class OrchestratorService {
         levelUp: false,
       };
     }
+  }
+
+  private async _handleShortResponse(user: User, platform: Platform) {
+    const agentPrompt = await this._getPrompt('all', 'short_response', 'coach');
+    if (!agentPrompt) {
+      logger.error('Short response agent prompt not found.');
+      await this._sendSimpleMessage(user.id, platform, "Please try saying a bit more.");
+      return;
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [{ role: "system", content: agentPrompt.systemMessage }],
+      max_tokens: 50,
+      temperature: 0.7
+    });
+    const responseText = completion.choices[0].message.content || "Can you tell me more?";
+    
+    await this._sendSimpleMessage(user.id, platform, responseText);
   }
 
   /**
@@ -302,11 +326,9 @@ export class OrchestratorService {
 
       let publicUrl: string;
       if (env.S3_ENDPOINT) {
-        // For Minio or other S3-compatible storage
         const endpoint = env.S3_ENDPOINT.replace(/\/$/, '');
         publicUrl = `${endpoint}/${bucket}/${key}`;
       } else {
-        // For AWS S3
         publicUrl = `https://${bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
       }
       
@@ -374,29 +396,31 @@ Provide a concise summary in Spanish.`;
 
   private async _sendContextualErrorMessage(userId: string, platform: string, error: any) {
     let errorMessage = "Lo siento, estamos teniendo problemas técnicos. Por favor, inténtalo de nuevo en unos minutos. 🔧";
-    try {
-      await axios.post(`${this.baseURL}/api/gateway/send-message`, { userId, platform, text: errorMessage }, { headers: { 'x-api-key': this.internalApiKey }});
-    } catch (sendError) {
-      logger.error('Failed to send contextual error message', { userId, sendError });
-    }
+    await this._sendSimpleMessage(userId, platform, errorMessage);
   }
 
   private async _sendPracticeErrorMessage(userId: string, platform: string) {
     const message = `Tuvimos un problema técnico, pero no te preocupes: tu práctica y progreso se guardaron. ¡Puedes seguir practicando! 🚀`;
+    await this._sendSimpleMessage(userId, platform, message);
+  }
+
+  private async _sendSimpleMessage(userId: string, platform: string, text: string) {
     try {
-      await axios.post(`${this.baseURL}/api/gateway/send-message`, { userId, platform, text: message }, { headers: { 'x-api-key': this.internalApiKey }});
+      await axios.post(`${this.baseURL}/api/gateway/send-message`, { userId, platform, text }, { headers: { 'x-api-key': this.internalApiKey }});
     } catch (error) {
-      logger.error('Failed to send practice error message', { userId, error });
+      logger.error('Failed to send simple message', { userId, error });
     }
   }
 
   private async _getPrompt(level: string, type: string, persona: string) {
-    let prompt = await prisma.prompt.findFirst({ where: { cefrLevel: level, promptType: type, persona: persona } });
+    const id = `${level}-${type}-${persona}`;
+    let prompt = await prisma.prompt.findUnique({ where: { id } });
     if (!prompt) {
-      prompt = await prisma.prompt.findFirst({ where: { cefrLevel: 'all', promptType: type, persona: persona } });
+      const fallbackId = `all-${type}-${persona}`;
+      prompt = await prisma.prompt.findUnique({ where: { id: fallbackId } });
     }
     if (!prompt) {
-      logger.error('Could not find any prompt for', { level, type, persona });
+      logger.error('Could not find any prompt for', { level, type, persona, id });
     }
     return prompt;
   }
@@ -418,12 +442,6 @@ Provide a concise summary in Spanish.`;
   }
 
   private async _sendFeedbackToUser(userId: string, platform: string, audioUrl: string | undefined, textSummary: string) {
-    // DEBUG: Log agent outputs before sending to gateway
-    logger.info('--- AGENT OUTPUTS ---');
-    logger.info(`[Audio URL]: ${audioUrl}`);
-    logger.info(`[Text Summary]: ${JSON.stringify(textSummary)}`);
-    logger.info('---------------------');
-
     try {
       await axios.post(`${this.baseURL}/api/gateway/send-message`, {
         userId, platform, audioUrl, text: textSummary
@@ -435,10 +453,12 @@ Provide a concise summary in Spanish.`;
   }
 
   private async _checkLevelUpEligibility(userId: string) {
+    // TODO: Implement logic from ProgressionService
     logger.info('Placeholder: Checking level up eligibility', { userId });
   }
 
   private _countWords(text: string): number {
+    if (!text) return 0;
     return text.trim().split(/\s+/).filter(Boolean).length;
   }
 }
