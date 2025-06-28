@@ -36,6 +36,7 @@ model User {
   achievements    UserAchievement[]
   levelTests      LevelTest[]
   onboardingState OnboardingState[]
+  chatHistory     ChatHistory[]
   
   @@map("users")
 }
@@ -184,4 +185,17 @@ model ApiUsage {
   createdAt       DateTime @default(now())
   
   @@map("api_usage")
+}
+
+model ChatHistory {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String   // 'user' or 'assistant'
+  content   String
+  agentName String?  @map("agent_name")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("chat_history")
 }
