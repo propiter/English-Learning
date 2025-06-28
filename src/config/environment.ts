@@ -58,6 +58,9 @@ const envSchema = z.object({
   OPENAI_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('60000'),
   TELEGRAM_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('10000'),
   WHATSAPP_API_TIMEOUT: z.string().transform(Number).pipe(z.number().int().positive()).default('10000'),
+
+  // Conversational AI
+  CHAT_HISTORY_WINDOW_SIZE: z.string().transform(Number).pipe(z.number().int().positive()).default('10'),
 });
 
 /**

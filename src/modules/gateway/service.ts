@@ -34,6 +34,7 @@ export class MessagingGatewayService {
         throw createError(`User not found for sending message: ${userId}`, 404);
       }
 
+      // For Telegram, the platform ID is the chat ID.
       const platformId = platform === 'telegram' ? user.telegramId : user.whatsappId;
       if (!platformId) {
         throw createError(`User ${userId} does not have a ${platform} ID.`, 400);
@@ -333,11 +334,11 @@ export class MessagingGatewayService {
   }
 
   private async _processMessage(messageData: MessagePayload) {
+    const user = await this._ensureUserExists(messageData);
+    
     try {
-      const user = await this._ensureUserExists(messageData);
-      
-      // FIX: Correctly pass arguments to the orchestrator
-      await orchestratorService.handleUserMessage(
+      // 1. Invoke the orchestrator and CAPTURE the result.
+      const finalState = await orchestratorService.handleUserMessage(
         user.id,
         messageData.inputType,
         messageData.content,
@@ -350,12 +351,42 @@ export class MessagingGatewayService {
         inputType: messageData.inputType 
       });
 
+      // 2. Extract the response text from the result.
+      // The graph service puts the final message in `agentOutcome`.
+      const responseText = finalState?.agentOutcome as string;
+
+      // 3. If there's a response, send it back to the user.
+      if (responseText) {
+        await this.sendMessage(
+          user.id,
+          messageData.platform,
+          undefined, // audioUrl - not implemented for this response
+          responseText
+        );
+      } else {
+        logger.warn('Orchestrator graph finished but provided no response to send.', { userId: user.id });
+      }
+
     } catch (error) {
-      logger.error('Error processing message:', { 
+      logger.error('Error during message processing orchestration:', { 
         platformId: messageData.platformId,
         platform: messageData.platform,
         error 
       });
+      
+      // Attempt to send a generic error message back to the user
+      try {
+        await this.sendMessage(
+          user.id,
+          messageData.platform,
+          undefined,
+          "I'm sorry, I seem to have encountered a technical problem. Please give me a moment."
+        );
+      } catch (sendError) {
+        logger.error('Failed to send error message to user after processing failure.', { userId: user.id, sendError });
+      }
+
+      // Re-throw original error to be handled by the controller's error handler
       throw error;
     }
   }
