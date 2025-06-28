@@ -6,7 +6,7 @@ import { Runnable } from '@langchain/core/runnables';
 import { z } from 'zod';
 import prisma from '../../config/database.js';
 import { logger } from '../../utils/logger.js';
-import { tracer } from '../../lib/tracer.js';
+import { tracer } from '../../utils/tracer.js';
 import { User } from '../../types/index.js';
 import env from '../../config/environment.js';
 
@@ -160,9 +160,19 @@ class GraphService {
       chat_history: formatMessagesForPrompt(messages.slice(0, -1)),
       workflow_status: user.onboardingStep,
       user_cefr_level: user.cefrLevel,
+      studentName: user.firstName,
+      cefrLevel: user.cefrLevel,
+      onboardingStep: user.onboardingStep,
+      interests: user.interests?.join(', ') || 'not specified',
+      learningGoal: user.learningGoal || 'not specified',
+      userProfile: JSON.stringify(user, null, 2),
+      user_profile: JSON.stringify(user, null, 2),
     }) as { agent_to_invoke: string; reasoning: string };
     
-    tracer.decision('Orchestrator', `LLM wants to invoke: ${response.agent_to_invoke}`, response.reasoning);
+    tracer.decision('Orchestrator', { 
+      decision: `LLM wants to invoke: ${response.agent_to_invoke}`, 
+      reasoning: response.reasoning 
+    });
     
     const agentToInvoke = response.agent_to_invoke;
     if (agentRunnables[agentToInvoke]) {

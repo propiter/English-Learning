@@ -45,8 +45,8 @@ model Subscription {
   id              String   @id @default(uuid())
   userId          String   @unique
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan            String   // "free", "premium", "pro"
-  status          String   // "active", "canceled", "past_due", "trialing"
+  plan            String   @default("free") // "free", "premium", "pro"
+  status          String   @default("active") // "active", "canceled", "past_due", "trialing"
   stripeCustomerId String?
   stripeSubscriptionId String?
   currentPeriodStart DateTime?
@@ -116,7 +116,7 @@ model Prompt {
   id              String   @id @default(uuid())
   cefrLevel       String   // Level this prompt applies to
   promptType      String   // "daily_practice", "onboarding", "evaluation_test", "level_up"
-  persona         String   @default("alex") // alex, reporter, etc.
+  persona         String   @default("lingo") // lingo, reporter, etc.
   title           String
   systemMessage   String
   userPrompt      String?  // Optional user-facing prompt
