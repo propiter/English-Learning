@@ -178,12 +178,18 @@ WHATSAPP_ACCESS_TOKEN="your-whatsapp-access-token"
 ### Messaging
 - `POST /gateway/webhook/telegram` - Telegram webhook
 - `POST /gateway/webhook/whatsapp` - WhatsApp webhook
+## Webchat
+- `GET /gateway/webchat/:chatId/messages` - Get webchat messages
+- `POST /gateway/webchat/:chatId/send` - Send webchat message
 
 ### Orchestrator
 - `POST /orchestrator/process-message` - Process user message (internal)
 
 ### Health & Monitoring
 - `GET /health` - Health check with service status
+- `GET /orchestrator/llm-status` - LLM providers status
+- `GET /orchestrator/stt-status` - Speech-to-Text providers status
+- `GET /orchestrator/tts-status` - Text-to-Speech providers status
 - `GET /docs` - API documentation
 
 ## 🔄 Main User Flow

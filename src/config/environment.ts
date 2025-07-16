@@ -17,14 +17,41 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32, 'JWT secret must be at least 32 characters'),
   INTERNAL_API_KEY: z.string().min(32, 'Internal API key must be at least 32 characters'),
   
-  // OpenAI
-  OPENAI_API_KEY: z.string().startsWith('sk-', 'Invalid OpenAI API key format'),
-  
+// OpenAI
+OPENAI_API_KEY: z
+  .string()
+  .optional()
+  .refine(val => val === undefined || val.startsWith('sk-'), {
+    message: 'Invalid OpenAI API key format',
+  }),
+OPENAI_MODEL_NAME: z.string().default('gpt-4-turbo').optional(),
+
+// Google AI
+GOOGLE_API_KEY: z
+  .string()
+  .optional()
+  .refine(val => val === undefined || val.length > 0, {
+    message: 'Google API key must not be empty if set',
+  }),
+GOOGLE_MODEL_NAME: z.string().default('models/gemini-2.0-flash-lite-preview-02-05').optional(),
+GOOGLE_APPLICATION_CREDENTIALS: z.string().optional(),
+
+// DeepSeek
+DEEPSEEK_API_KEY: z
+  .string()
+  .optional()
+  .refine(val => val === undefined || val.length > 0, {
+    message: 'DeepSeek API key must not be empty if set',
+  }),
+DEEPSEEK_MODEL_NAME: z.string().default('deepseek-chat').optional(),
+DEEPSEEK_BASE_URL: z.string().url().default('https://api.deepseek.com/v1').optional(),
+DEEPSEEK_STT_ENABLED: z.string().default('false').optional(),
+
   // Messaging platforms
-  TELEGRAM_BOT_TOKEN: z.string().min(1, 'Telegram bot token is required'),
-  WHATSAPP_API_URL: z.string().url('Invalid WhatsApp API URL'),
-  WHATSAPP_ACCESS_TOKEN: z.string().min(1, 'WhatsApp access token is required'),
-  WHATSAPP_VERIFY_TOKEN: z.string().min(1, 'WhatsApp verify token is required'),
+  TELEGRAM_BOT_TOKEN: z.string().min(1, 'Telegram bot token is required').optional(),
+  WHATSAPP_API_URL: z.string().url('Invalid WhatsApp API URL').optional(),
+  WHATSAPP_ACCESS_TOKEN: z.string().min(1, 'WhatsApp access token is required').optional(),
+  WHATSAPP_VERIFY_TOKEN: z.string().min(1, 'WhatsApp verify token is required').optional(),
   
   // Server
   PORT: z.string().transform(Number).pipe(z.number().int().min(1).max(65535)),

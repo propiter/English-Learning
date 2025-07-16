@@ -1,6 +1,5 @@
 import { BaseMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
-import { ChatOpenAI } from '@langchain/openai';
 import { StateGraph, END } from '@langchain/langgraph';
 import { Runnable } from '@langchain/core/runnables';
 import { z } from 'zod';
@@ -8,7 +7,7 @@ import prisma from '../../config/database.js';
 import { logger } from '../../utils/logger.js';
 import { tracer } from '../../utils/tracer.js';
 import { User } from '../../types/index.js';
-import env from '../../config/environment.js';
+import { llmManager } from '../../config/llm.js';
 
 /**
  * Defines the state that flows through the graph.
@@ -70,12 +69,6 @@ class GraphService {
     const prompts = await prisma.prompt.findMany({ where: { isActive: true } });
 
     for (const prompt of prompts) {
-      const model = new ChatOpenAI({
-        modelName: 'gpt-4-turbo',
-        temperature: 0.2,
-        apiKey: env.OPENAI_API_KEY,
-      });
-      
       // The user-facing prompts are now complex and contain examples with JSON.
       // We must escape all curly braces in the system message to prevent LangChain's
       // prompt formatter from misinterpreting them as variables.
@@ -87,11 +80,18 @@ class GraphService {
       ]);
       
       if (prompt.promptType === 'orchestrator') {
-        const structuredLLM = model.withStructuredOutput(orchestratorSchema, {
-          method: "tool_calling",
+        // Usar el nuevo método para structured output
+        const structuredLLM = await llmManager.getStructuredLLMClient(orchestratorSchema, {
+          temperature: 0.2,
+          maxTokens: 4096,
         });
         agentRunnables[prompt.promptType] = promptTemplate.pipe(structuredLLM);
       } else {
+        // Para agentes normales, usar cliente estándar
+        const model = await llmManager.getLLMClient({
+          temperature: 0.2,
+          maxTokens: 4096,
+        });
         agentRunnables[prompt.promptType] = promptTemplate.pipe(model);
       }
     }

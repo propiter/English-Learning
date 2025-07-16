@@ -5,13 +5,9 @@ import { CEFR_LEVELS } from '../../types/index.js';
 import { createError } from '../../middleware/errorHandler.js';
 import { messagingGatewayService } from '../gateway/service.js';
 import { Platform } from '../../types/index.js';
-import { OpenAI } from 'openai';
+import { getLLMClient } from '../../config/llm.js';
 import env from '../../config/environment.js';
 
-const openai = new OpenAI({
-  apiKey: env.OPENAI_API_KEY,
-  timeout: env.OPENAI_API_TIMEOUT
-});
 
 /**
  * Onboarding state interface
@@ -241,18 +237,19 @@ Let's begin your English journey! 💪`;
       const prompt = await prisma.prompt.findUnique({ where: { id: 'all-speech_evaluation-evaluator' } });
       if (!prompt) throw new Error('Speech evaluation prompt not found');
 
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4-turbo",
-        messages: [
+      const llmClient = await getLLMClient({ temperature: 0.2 });
+      
+      const completion = await llmClient.invoke([
           { role: "system", content: prompt.systemMessage },
           { role: "user", content: `Student CEFR Level: ${level}\nText to evaluate: "${transcription}"` }
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.2,
-      });
+        ]);
 
-      const jsonResponse = completion.choices[0].message.content;
-      return JSON.parse(jsonResponse!);
+      // Try to parse JSON response, fallback to simple evaluation
+      try {
+        return JSON.parse(completion.content);
+      } catch {
+        return { overall: 60, feedback: { overall: completion.content } };
+      }
     } catch (error) {
       logger.error('Failed to evaluate response with AI, using fallback.', { error });
       return { overall: 60, feedback: { overall: "Could not evaluate." } };

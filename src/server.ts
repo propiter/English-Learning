@@ -280,6 +280,16 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
  */
 async function startServer() {
   try {
+    // Mostrar resumen de configuración al inicio
+    const { llmManager } = await import('./config/llm.js');
+    const llmSummary = llmManager.getConfigurationSummary();
+    
+    logger.info('🎯 Configuración de servicios:', {
+      llm: llmSummary,
+      environment: env.NODE_ENV,
+      port: env.PORT
+    });
+    
     // Connect to Redis
     await redisManager.connect();
     

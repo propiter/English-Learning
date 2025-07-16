@@ -6,6 +6,10 @@ import { createError } from '../../middleware/errorHandler.js';
 import prisma from '../../config/database.js';
 import { graphService } from '../graph/service.js';
 import { tracer } from '../../utils/tracer.js';
+import { transcribeAudio } from '../../services/speechToText.js';
+import { synthesizeText, textToSpeechService } from '../../services/textToSpeech.js';
+import { messagingGatewayService } from '../gateway/service.js';
+import { llmManager } from '../../config/llm.js';
 import env from '../../config/environment.js';
 
 /**
@@ -20,7 +24,12 @@ export class OrchestratorService {
   }
 
   private async initializeGraph() {
-    await graphService.loadAgentsFromDb();
+    try {
+      await graphService.loadAgentsFromDb();
+    } catch (error) {
+      logger.error('Error loading agents from database:', error);
+      throw new Error(`Failed to initialize conversational graph: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
     this.compiledGraph = graphService.buildGraph();
     logger.info('Conversational graph compiled and ready.');
   }
@@ -43,10 +52,25 @@ export class OrchestratorService {
       
       // For audio input, content is already the S3 URL from gateway processing
       if (inputType === 'audio') {
-        // Here we would call speech-to-text service to transcribe the audio
-        // For now, we'll use the S3 URL as placeholder until STT is implemented
-        textInput = `[Audio message: ${content}]`;
-        logger.info('Processing audio message', { userId, audioUrl: content, platform });
+        try {
+          // Download audio from S3 URL and transcribe
+          const audioBuffer = await this._downloadAudioFromUrl(content);
+          textInput = await transcribeAudio(audioBuffer, {
+            language: user.language === 'es' ? 'es' : 'en',
+            model: 'whisper-1'
+          });
+          
+          logger.info('Audio transcribed successfully', { 
+            userId, 
+            audioUrl: content, 
+            platform,
+            transcriptionLength: textInput.length,
+            transcriptionPreview: textInput.substring(0, 100) + '...'
+          });
+        } catch (error) {
+          logger.error('Failed to transcribe audio:', { userId, audioUrl: content, error });
+          throw createError('Failed to process audio message', 500);
+        }
       }
       
       tracer.userInput(textInput);
@@ -68,9 +92,28 @@ export class OrchestratorService {
 
       if (typeof agentResponse === 'string' && agentResponse) {
         await this._saveToChatHistory(user.id, 'assistant', agentResponse, agentName);
+        
+        // Generate audio response if TTS is available
+        let audioUrl: string | undefined;
+        if (textToSpeechService.isAvailable()) {
+          try {
+            const audioBuffer = await synthesizeText(agentResponse, {
+              language: user.language === 'es' ? 'es-ES' : 'en-US',
+              voice: user.language === 'es' ? 'es-ES-Standard-A' : 'en-US-Standard-A'
+            });
+            
+            audioUrl = await messagingGatewayService.uploadResponseAudio(audioBuffer, user.id);
+            logger.info('Audio response generated successfully', { userId: user.id, audioUrl });
+          } catch (error) {
+            logger.warn('Failed to generate audio response, continuing with text only:', error);
+          }
+        }
+        
+        // Send response back to user
+        await messagingGatewayService.sendMessage(user.id, platform, audioUrl, agentResponse);
       }
 
-      return { ...finalState, agentOutcome: agentResponse };
+      return { ...finalState, agentOutcome: agentResponse, audioGenerated: !!audioUrl };
 
     } catch (error) {
       logger.error('Critical error in orchestrator service:', {
@@ -99,6 +142,24 @@ export class OrchestratorService {
     await prisma.chatHistory.create({
       data: { userId, role, content, agentName },
     });
+  }
+
+  /**
+   * Download audio file from S3 URL
+   */
+  private async _downloadAudioFromUrl(audioUrl: string): Promise<Buffer> {
+    try {
+      const response = await fetch(audioUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download audio: ${response.status} ${response.statusText}`);
+      }
+      
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } catch (error) {
+      logger.error('Error downloading audio from URL:', { audioUrl, error });
+      throw new Error(`Failed to download audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 }
 
