@@ -218,8 +218,8 @@ export class MessagingGatewayService {
     
     // Also store in a list for polling
     const listKey = `webchat:messages:${chatId}`;
-    await redisManager.getClient().lpush(listKey, JSON.stringify(response));
-    await redisManager.getClient().ltrim(listKey, 0, 49); // Keep last 50 messages
+    await redisManager.getClient().lPush(listKey, JSON.stringify(response));
+    await redisManager.getClient().lTrim(listKey, 0, 49); // Keep last 50 messages
     await redisManager.getClient().expire(listKey, 3600); // 1 hour TTL
 
     logger.info('Web chat message queued for delivery', { chatId, hasAudio: !!audioUrl, hasText: !!text });
@@ -409,8 +409,16 @@ export class MessagingGatewayService {
     }
 
     if (!inputType || !content) {
+      logger.warn('Web chat webhook missing content', { chat });
       return null;
     }
+
+    logger.info('Processing web chat message', {
+      platformId,
+      username,
+      inputType,
+      contentLength: content.length
+    });
 
     return {
       platformId,
@@ -428,6 +436,13 @@ export class MessagingGatewayService {
   }
 
   private async _processMessage(messageData: MessagePayload) {
+    logger.info('Processing message', {
+      platform: messageData.platform,
+      platformId: messageData.platformId,
+      inputType: messageData.inputType,
+      contentLength: messageData.content.length
+    });
+    
     const user = await this._ensureUserExists(messageData);
     
     try {
@@ -437,6 +452,13 @@ export class MessagingGatewayService {
       if (messageData.inputType === 'audio') {
         processedContent = await this._processAudioContent(messageData);
       }
+
+      logger.info('Invoking orchestrator', {
+        userId: user.id,
+        platform: messageData.platform,
+        inputType: messageData.inputType,
+        processedContentLength: processedContent.length
+      });
 
       // Invoke the orchestrator with processed content
       const finalState = await orchestratorService.handleUserMessage(
@@ -452,20 +474,11 @@ export class MessagingGatewayService {
         inputType: messageData.inputType 
       });
 
-      // Extract the response text from the result
-      const responseText = finalState?.agentOutcome as string;
-
-      // If there's a response, send it back to the user
-      if (responseText) {
-        await this.sendMessage(
-          user.id,
-          messageData.platform,
-          undefined, // audioUrl - could be implemented later for TTS
-          responseText
-        );
-      } else {
-        logger.warn('Orchestrator graph finished but provided no response to send.', { userId: user.id });
-      }
+      logger.info('Message processing completed', {
+        userId: user.id,
+        platform: messageData.platform,
+        success: true
+      });
 
     } catch (error) {
       logger.error('Error during message processing orchestration:', { 
@@ -474,18 +487,6 @@ export class MessagingGatewayService {
         error 
       });
       
-      // Attempt to send a generic error message back to the user
-      try {
-        await this.sendMessage(
-          user.id,
-          messageData.platform,
-          undefined,
-          "I'm sorry, I seem to have encountered a technical problem. Please give me a moment."
-        );
-      } catch (sendError) {
-        logger.error('Failed to send error message to user after processing failure.', { userId: user.id, sendError });
-      }
-
       throw error;
     }
   }
@@ -693,11 +694,10 @@ export class MessagingGatewayService {
   async getWebChatMessages(chatId: string, since?: string): Promise<any[]> {
     try {
       const listKey = `webchat:messages:${chatId}`;
-      const messages = await redisManager.getClient().lrange(listKey, 0, -1);
+      const messages = await redisManager.getClient().lRange(listKey, 0, -1);
       
       const parsedMessages = messages.map(msg => JSON.parse(msg));
       
-      // Filter by timestamp if 'since' is provided
       if (since) {
         const sinceDate = new Date(since);
         return parsedMessages.filter(msg => new Date(msg.timestamp) > sinceDate);
