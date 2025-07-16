@@ -4,6 +4,13 @@
   "description": "Backend for an English learning SaaS platform",
   "main": "dist/server.js",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "vercel": {
+    "outputDirectory": "dist",
+    "public": false
+  },
   "scripts": {
     "build": "npm run prisma:generate && tsc",
     "start": "node dist/server.js",
@@ -79,8 +86,5 @@
     "ts-jest": "^29.1.2",
     "tsx": "^4.11.0",
     "typescript": "^5.4.5"
-  },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
   }
 }
