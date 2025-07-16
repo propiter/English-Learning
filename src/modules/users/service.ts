@@ -7,6 +7,7 @@ export const userService = {
   async createUser(userData: {
     telegramId?: string;
     whatsappId?: string;
+    webChatId?: string;
     firstName: string;
     lastName?: string;
     username?: string;
@@ -15,13 +16,14 @@ export const userService = {
   }) {
     try {
       // Validate that at least one platform ID is provided
-      if (!userData.telegramId && !userData.whatsappId) {
-        throw createError('Either telegramId or whatsappId must be provided', 400);
+      if (!userData.telegramId && !userData.whatsappId && !userData.webChatId) {
+        throw createError('Either telegramId, whatsappId, or webChatId must be provided', 400);
       }
 
       // Determine platform and ID correctly
-      const platform = userData.telegramId ? 'telegram' : 'whatsapp';
-      const platformId = userData.telegramId || userData.whatsappId!;
+      const platform = userData.telegramId ? 'telegram' : 
+                      userData.whatsappId ? 'whatsapp' : 'web';
+      const platformId = userData.telegramId || userData.whatsappId || userData.webChatId!;
 
       // Check if user already exists
       const existingUser = await this.getUserByPlatformId(platform, platformId);
@@ -75,11 +77,13 @@ export const userService = {
     }
   },
 
-  async getUserByPlatformId(platform: 'telegram' | 'whatsapp', platformId: string) {
+  async getUserByPlatformId(platform: 'telegram' | 'whatsapp' | 'web', platformId: string) {
     try {
       const whereClause = platform === 'telegram' 
         ? { telegramId: platformId }
-        : { whatsappId: platformId };
+        : platform === 'whatsapp'
+        ? { whatsappId: platformId }
+        : { webChatId: platformId };
 
       return await prisma.user.findUnique({
         where: whereClause,

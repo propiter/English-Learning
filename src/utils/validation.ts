@@ -6,13 +6,14 @@ import { z } from 'zod';
 export const userRegistrationSchema = z.object({
   telegramId: z.string().optional(),
   whatsappId: z.string().optional(),
+  webChatId: z.string().optional(),
   firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
   lastName: z.string().max(50, 'Last name too long').optional(),
   username: z.string().max(50, 'Username too long').optional(),
   language: z.string().length(2, 'Language must be 2 characters').default('es'),
   timezone: z.string().default('UTC')
-}).refine(data => data.telegramId || data.whatsappId, {
-  message: 'Either telegramId or whatsappId must be provided'
+}).refine(data => data.telegramId || data.whatsappId || data.webChatId, {
+  message: 'Either telegramId, whatsappId, or webChatId must be provided'
 });
 
 /**
@@ -117,6 +118,22 @@ export const whatsappWebhookSchema = z.object({
       )
     })
   )
+});
+
+/**
+ * Web chat webhook validation schema
+ */
+export const webChatWebhookSchema = z.object({
+  chat: z.object({
+    id: z.string().uuid('Invalid chat ID format'),
+    username: z.string().min(1, 'Username is required'),
+    message: z.object({
+      text: z.string().optional(),
+      file: z.string().optional() // Base64 encoded audio
+    }).refine(data => data.text || data.file, {
+      message: 'Either text or file must be provided'
+    })
+  })
 });
 
 /**

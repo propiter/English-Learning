@@ -161,30 +161,30 @@ WHATSAPP_ACCESS_TOKEN="your-whatsapp-access-token"
 ## 📡 API Endpoints
 
 ### User Management
-- `POST /api/users/register` - Register new user
-- `GET /api/users/:id` - Get user profile
-- `PUT /api/users/:id` - Update user profile
-- `GET /api/users/:id/progress` - Get learning progress
+- `POST /users/register` - Register new user
+- `GET /users/:id` - Get user profile
+- `PUT /users/:id` - Update user profile
+- `GET /users/:id/progress` - Get learning progress
 
 ### Learning Sessions
-- `POST /api/learning/sessions` - Create learning session (internal)
-- `GET /api/learning/users/:userId/sessions` - Get session history
-- `GET /api/learning/users/:userId/analytics` - Get learning analytics
+- `POST /learning/sessions` - Create learning session (internal)
+- `GET /learning/users/:userId/sessions` - Get session history
+- `GET /learning/users/:userId/analytics` - Get learning analytics
 
 ### Content Management
-- `GET /api/content/prompts` - Get AI prompts (internal)
-- `GET /api/content/daily-topic` - Get daily practice topic
+- `GET /content/prompts` - Get AI prompts (internal)
+- `GET /content/daily-topic` - Get daily practice topic
 
 ### Messaging
-- `POST /api/gateway/webhook/telegram` - Telegram webhook
-- `POST /api/gateway/webhook/whatsapp` - WhatsApp webhook
+- `POST /gateway/webhook/telegram` - Telegram webhook
+- `POST /gateway/webhook/whatsapp` - WhatsApp webhook
 
 ### Orchestrator
-- `POST /api/orchestrator/process-message` - Process user message (internal)
+- `POST /orchestrator/process-message` - Process user message (internal)
 
 ### Health & Monitoring
 - `GET /health` - Health check with service status
-- `GET /api/docs` - API documentation
+- `GET /docs` - API documentation
 
 ## 🔄 Main User Flow
 
@@ -292,7 +292,7 @@ docker-compose ps
 
 - Check logs in `./logs/` directory
 - Use health check endpoint: `GET /health`
-- Monitor webhook logs: `GET /api/gateway/webhook-logs`
+- Monitor webhook logs: `GET /gateway/webhook-logs`
 - Review error logs for detailed stack traces
 
 ## 🤝 Contributing
@@ -311,7 +311,7 @@ This project is licensed under the MIT License.
 
 For support and questions:
 - Check the health endpoint: `/health`
-- Review API documentation: `/api/docs`
+- Review API documentation: `/docs`
 - Check application logs
 - Create an issue in the repository
 

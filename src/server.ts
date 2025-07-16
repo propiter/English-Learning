@@ -75,8 +75,8 @@ app.use(cors({
 /**
  * Rate limiting
  */
-app.use('/api/', apiLimiter);
-app.use('/api/', speedLimiter);
+app.use('/', apiLimiter);
+app.use('/', speedLimiter);
 
 /**
  * Body parsing middleware
@@ -174,12 +174,12 @@ app.get('/health', async (req, res) => {
 /**
  * API routes
  */
-app.use('/api/users', userRoutes);
-app.use('/api/learning', learningRoutes);
-app.use('/api/orchestrator', orchestratorRoutes);
-app.use('/api/content', contentRoutes);
-app.use('/api/gateway', gatewayRoutes);
-app.use('/api/onboarding', onboardingRoutes);
+app.use('/users', userRoutes);
+app.use('/learning', learningRoutes);
+app.use('/orchestrator', orchestratorRoutes);
+app.use('/content', contentRoutes);
+app.use('/gateway', gatewayRoutes);
+app.use('/onboarding', onboardingRoutes);
 
 /**
  * Root endpoint
@@ -189,7 +189,7 @@ app.get('/', (req, res) => {
     message: 'English Learning SaaS API',
     version: process.env.npm_package_version || '1.0.0',
     environment: env.NODE_ENV,
-    documentation: '/api/docs',
+    documentation: '/docs',
     health: '/health',
     requestId: req.id,
     timestamp: new Date().toISOString()
@@ -199,29 +199,29 @@ app.get('/', (req, res) => {
 /**
  * API documentation endpoint
  */
-app.get('/api/docs', (req, res) => {
+app.get('/docs', (req, res) => {
   res.json({
     title: 'English Learning SaaS API Documentation',
     version: '1.0.0',
     endpoints: {
       users: {
-        'POST /api/users/register': 'Register new user',
-        'GET /api/users/:id': 'Get user profile',
-        'PUT /api/users/:id': 'Update user profile',
-        'GET /api/users/:id/progress': 'Get user progress'
+        'POST /users/register': 'Register new user',
+        'GET /users/:id': 'Get user profile',
+        'PUT /users/:id': 'Update user profile',
+        'GET /users/:id/progress': 'Get user progress'
       },
       learning: {
-        'POST /api/learning/sessions': 'Create learning session',
-        'GET /api/learning/users/:userId/sessions': 'Get session history',
-        'GET /api/learning/users/:userId/analytics': 'Get learning analytics'
+        'POST /learning/sessions': 'Create learning session',
+        'GET /learning/users/:userId/sessions': 'Get session history',
+        'GET /learning/users/:userId/analytics': 'Get learning analytics'
       },
       gateway: {
-        'POST /api/gateway/webhook/telegram': 'Telegram webhook',
-        'POST /api/gateway/webhook/whatsapp': 'WhatsApp webhook'
+        'POST /gateway/webhook/telegram': 'Telegram webhook',
+        'POST /gateway/webhook/whatsapp': 'WhatsApp webhook'
       },
       content: {
-        'GET /api/content/prompts': 'Get AI prompts',
-        'GET /api/content/daily-topic': 'Get daily practice topic'
+        'GET /content/prompts': 'Get AI prompts',
+        'GET /content/daily-topic': 'Get daily practice topic'
       }
     },
     requestId: req.id

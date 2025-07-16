@@ -5,9 +5,13 @@ import { MessagePayload, InputType } from '../../types/index.js';
 import { orchestratorService } from '../orchestrator/service.js';
 import { userService } from '../users/service.js';
 import { createError } from '../../middleware/errorHandler.js';
-import { validateRequestBody, telegramWebhookSchema, whatsappWebhookSchema } from '../../utils/validation.js';
+import { validateRequestBody, telegramWebhookSchema, whatsappWebhookSchema, webChatWebhookSchema } from '../../utils/validation.js';
 import env from '../../config/environment.js';
-import { onboardingService } from '../onboarding/service.js';
+import { Buffer } from 'buffer';
+import redisManager from '../../config/redis.js';
+import { s3Client } from '../../config/s3.js';
+import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Messaging gateway service for handling platform communications
@@ -17,11 +21,12 @@ export class MessagingGatewayService {
   private readonly telegramApiUrl = `https://api.telegram.org/bot${this.telegramToken}`;
   private readonly whatsappApiUrl = env.WHATSAPP_API_URL;
   private readonly whatsappToken = env.WHATSAPP_ACCESS_TOKEN;
+  private readonly s3Bucket = env.AWS_S3_BUCKET;
 
   /**
    * Send message to user on specified platform
    */
-  async sendMessage(userId: string, platform: 'telegram' | 'whatsapp', audioUrl?: string, text?: string) {
+  async sendMessage(userId: string, platform: 'telegram' | 'whatsapp' | 'web', audioUrl?: string, text?: string) {
     const startTime = Date.now();
     
     try {
@@ -34,8 +39,10 @@ export class MessagingGatewayService {
         throw createError(`User not found for sending message: ${userId}`, 404);
       }
 
-      // For Telegram, the platform ID is the chat ID.
-      const platformId = platform === 'telegram' ? user.telegramId : user.whatsappId;
+      // Get platform ID based on platform
+      const platformId = platform === 'telegram' ? user.telegramId : 
+                        platform === 'whatsapp' ? user.whatsappId : 
+                        user.webChatId;
       if (!platformId) {
         throw createError(`User ${userId} does not have a ${platform} ID.`, 400);
       }
@@ -45,6 +52,8 @@ export class MessagingGatewayService {
         result = await this._sendTelegramMessage(platformId, audioUrl, text);
       } else if (platform === 'whatsapp') {
         result = await this._sendWhatsAppMessage(platformId, audioUrl, text);
+      } else if (platform === 'web') {
+        result = await this._sendWebChatMessage(platformId, audioUrl, text);
       } else {
         throw createError(`Unsupported platform: ${platform}`, 400);
       }
@@ -179,15 +188,55 @@ export class MessagingGatewayService {
   }
 
   /**
+   * Send message via Web Chat
+   */
+  private async _sendWebChatMessage(chatId: string, audioUrl?: string, text?: string) {
+    const response = {
+      chatId,
+      timestamp: new Date().toISOString(),
+      messages: [] as any[]
+    };
+
+    if (audioUrl) {
+      response.messages.push({
+        type: 'audio',
+        content: audioUrl,
+        caption: "🎧 Here's your personalized feedback!"
+      });
+    }
+
+    if (text) {
+      response.messages.push({
+        type: 'text',
+        content: text
+      });
+    }
+
+    // Store in Redis for frontend to retrieve
+    const key = `webchat:response:${chatId}`;
+    await redisManager.setJSON(key, response, 300); // 5 minutes TTL
+    
+    // Also store in a list for polling
+    const listKey = `webchat:messages:${chatId}`;
+    await redisManager.getClient().lpush(listKey, JSON.stringify(response));
+    await redisManager.getClient().ltrim(listKey, 0, 49); // Keep last 50 messages
+    await redisManager.getClient().expire(listKey, 3600); // 1 hour TTL
+
+    logger.info('Web chat message queued for delivery', { chatId, hasAudio: !!audioUrl, hasText: !!text });
+    
+    return response;
+  }
+
+  /**
    * Process incoming webhook from messaging platforms
    */
-  async processIncomingWebhook(platform: 'telegram' | 'whatsapp', webhookData: any, signature?: string) {
+  async processIncomingWebhook(platform: 'telegram' | 'whatsapp' | 'web', webhookData: any, signature?: string) {
     const startTime = Date.now();
     
     try {
       this._validateWebhookData(platform, webhookData);
 
-      if (process.env.NODE_ENV === 'production' && signature) {
+      if (process.env.NODE_ENV === 'production' && signature && platform !== 'web') {
         this._verifyWebhookSignature(platform, webhookData, signature);
       }
 
@@ -209,14 +258,16 @@ export class MessagingGatewayService {
     }
   }
 
-  private _validateWebhookData(platform: 'telegram' | 'whatsapp', webhookData: any) {
+  private _validateWebhookData(platform: 'telegram' | 'whatsapp' | 'web', webhookData: any) {
     try {
       if (platform === 'telegram') {
         // Telegram can send an array of updates
         const dataToValidate = Array.isArray(webhookData) ? webhookData[0] : webhookData;
         validateRequestBody(telegramWebhookSchema)(dataToValidate);
-      } else {
+      } else if (platform === 'whatsapp') {
         validateRequestBody(whatsappWebhookSchema)(webhookData);
+      } else if (platform === 'web') {
+        validateRequestBody(webChatWebhookSchema)(webhookData);
       }
     } catch (error) {
       logger.warn('Invalid webhook data structure:', { platform, error });
@@ -243,13 +294,16 @@ export class MessagingGatewayService {
     }
   }
 
-  private _extractMessageData(platform: 'telegram' | 'whatsapp', webhookData: any): MessagePayload | null {
+  private _extractMessageData(platform: 'telegram' | 'whatsapp' | 'web', webhookData: any): MessagePayload | null {
     if (platform === 'telegram') {
       const data = Array.isArray(webhookData) ? webhookData[0] : webhookData;
       return this._processTelegramWebhook(data);
-    } else {
+    } else if (platform === 'whatsapp') {
       return this._processWhatsAppWebhook(webhookData);
+    } else if (platform === 'web') {
+      return this._processWebChatWebhook(webhookData);
     }
+    return null;
   }
 
   private _processTelegramWebhook(webhookData: any): MessagePayload | null {
@@ -333,15 +387,62 @@ export class MessagingGatewayService {
     };
   }
 
+  /**
+   * Process web chat webhook
+   */
+  private _processWebChatWebhook(webhookData: any): MessagePayload | null {
+    const { chat } = webhookData;
+    if (!chat) return null;
+
+    const platformId = chat.id;
+    const username = chat.username;
+
+    let inputType: InputType | null = null;
+    let content: string | null = null;
+
+    if (chat.message.file) {
+      inputType = 'audio';
+      content = chat.message.file; // Base64 encoded audio
+    } else if (chat.message.text) {
+      inputType = 'text';
+      content = chat.message.text;
+    }
+
+    if (!inputType || !content) {
+      return null;
+    }
+
+    return {
+      platformId,
+      platform: 'web',
+      inputType,
+      content,
+      chatId: platformId,
+      rawData: webhookData,
+      userData: {
+        firstName: username,
+        username: username,
+        chatId: platformId
+      }
+    };
+  }
+
   private async _processMessage(messageData: MessagePayload) {
     const user = await this._ensureUserExists(messageData);
     
     try {
-      // 1. Invoke the orchestrator and CAPTURE the result.
+      // Process audio content if needed
+      let processedContent = messageData.content;
+      
+      if (messageData.inputType === 'audio') {
+        processedContent = await this._processAudioContent(messageData);
+      }
+
+      // Invoke the orchestrator with processed content
       const finalState = await orchestratorService.handleUserMessage(
         user.id,
         messageData.inputType,
-        messageData.content,
+        processedContent,
         messageData.platform,
         messageData.rawData
       );
@@ -351,16 +452,15 @@ export class MessagingGatewayService {
         inputType: messageData.inputType 
       });
 
-      // 2. Extract the response text from the result.
-      // The graph service puts the final message in `agentOutcome`.
+      // Extract the response text from the result
       const responseText = finalState?.agentOutcome as string;
 
-      // 3. If there's a response, send it back to the user.
+      // If there's a response, send it back to the user
       if (responseText) {
         await this.sendMessage(
           user.id,
           messageData.platform,
-          undefined, // audioUrl - not implemented for this response
+          undefined, // audioUrl - could be implemented later for TTS
           responseText
         );
       } else {
@@ -386,8 +486,83 @@ export class MessagingGatewayService {
         logger.error('Failed to send error message to user after processing failure.', { userId: user.id, sendError });
       }
 
-      // Re-throw original error to be handled by the controller's error handler
       throw error;
+    }
+  }
+
+  /**
+   * Process audio content based on platform
+   */
+  private async _processAudioContent(messageData: MessagePayload): Promise<string> {
+    let audioBuffer: Buffer;
+    let audioUrl: string;
+
+    try {
+      if (messageData.platform === 'telegram') {
+        audioBuffer = await this.downloadTelegramAudio(messageData.content);
+        audioUrl = await this._uploadAudioToS3(audioBuffer, 'telegram', messageData.platformId);
+      } else if (messageData.platform === 'whatsapp') {
+        audioBuffer = await this.downloadWhatsAppAudio(messageData.content);
+        audioUrl = await this._uploadAudioToS3(audioBuffer, 'whatsapp', messageData.platformId);
+      } else if (messageData.platform === 'web') {
+        audioBuffer = await this.processWebChatAudio(messageData.content);
+        audioUrl = await this._uploadAudioToS3(audioBuffer, 'web', messageData.platformId);
+      } else {
+        throw createError(`Unsupported platform for audio processing: ${messageData.platform}`, 400);
+      }
+
+      logger.info('Audio processed and uploaded to S3', {
+        platform: messageData.platform,
+        platformId: messageData.platformId,
+        audioUrl,
+        audioSize: audioBuffer.length
+      });
+
+      return audioUrl;
+    } catch (error) {
+      logger.error('Error processing audio content:', {
+        platform: messageData.platform,
+        platformId: messageData.platformId,
+        error
+      });
+      throw createError('Failed to process audio content', 500);
+    }
+  }
+
+  /**
+   * Upload audio buffer to S3 and return public URL
+   */
+  private async _uploadAudioToS3(audioBuffer: Buffer, platform: string, platformId: string): Promise<string> {
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const audioId = uuidv4();
+      const key = `audio/${platform}/${platformId}/${timestamp}-${audioId}.ogg`;
+
+      const command = new PutObjectCommand({
+        Bucket: this.s3Bucket,
+        Key: key,
+        Body: audioBuffer,
+        ContentType: 'audio/ogg',
+        ACL: 'public-read'
+      });
+
+      await s3Client.send(command);
+
+      // Construct public URL
+      const publicUrl = env.S3_ENDPOINT 
+        ? `${env.S3_ENDPOINT}/${this.s3Bucket}/${key}`
+        : `https://${this.s3Bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+
+      logger.info('Audio uploaded to S3 successfully', {
+        key,
+        publicUrl,
+        size: audioBuffer.length
+      });
+
+      return publicUrl;
+    } catch (error) {
+      logger.error('Error uploading audio to S3:', error);
+      throw createError('Failed to upload audio to storage', 500);
     }
   }
 
@@ -403,7 +578,9 @@ export class MessagingGatewayService {
       }
 
       const userData = {
-        [messageData.platform === 'telegram' ? 'telegramId' : 'whatsappId']: messageData.platformId,
+        [messageData.platform === 'telegram' ? 'telegramId' : 
+         messageData.platform === 'whatsapp' ? 'whatsappId' : 
+         'webChatId']: messageData.platformId,
         firstName: messageData.userData?.firstName || 'User',
         lastName: messageData.userData?.lastName || '',
         username: messageData.userData?.username || `user_${Date.now()}`,
@@ -431,6 +608,9 @@ export class MessagingGatewayService {
     }
   }
 
+  /**
+   * Download Telegram audio file
+   */
   async downloadTelegramAudio(fileId: string): Promise<Buffer> {
     try {
       const fileInfoResponse = await axios.get(`${this.telegramApiUrl}/getFile`, {
@@ -453,6 +633,9 @@ export class MessagingGatewayService {
     }
   }
 
+  /**
+   * Download WhatsApp audio file
+   */
   async downloadWhatsAppAudio(mediaId: string): Promise<Buffer> {
     try {
       const mediaInfoResponse = await axios.get(`${this.whatsappApiUrl}/${mediaId}`, {
@@ -472,6 +655,121 @@ export class MessagingGatewayService {
     } catch (error) {
       logger.error('Error downloading WhatsApp audio:', { mediaId, error });
       throw createError('Failed to download audio file', 500);
+    }
+  }
+
+  /**
+   * Process base64 audio for web chat
+   */
+  async processWebChatAudio(base64Audio: string): Promise<Buffer> {
+    try {
+      // Remove data URL prefix if present (e.g., "data:audio/wav;base64,")
+      const base64Data = base64Audio.replace(/^data:audio\/[a-z0-9]+;base64,/, '');
+      
+      // Convert base64 to buffer
+      const audioBuffer = Buffer.from(base64Data, 'base64');
+      
+      // Validate audio size (max 10MB as per env config)
+      const maxSize = env.MAX_AUDIO_FILE_SIZE_MB * 1024 * 1024;
+      if (audioBuffer.length > maxSize) {
+        throw createError(`Audio file too large. Max size: ${env.MAX_AUDIO_FILE_SIZE_MB}MB`, 400);
+      }
+      
+      logger.info('Web chat audio processed successfully', {
+        originalSize: base64Audio.length,
+        bufferSize: audioBuffer.length
+      });
+      
+      return audioBuffer;
+    } catch (error) {
+      logger.error('Error processing web chat audio:', error);
+      throw createError('Failed to process audio file', 500);
+    }
+  }
+
+  /**
+   * Get messages for web chat (polling endpoint)
+   */
+  async getWebChatMessages(chatId: string, since?: string): Promise<any[]> {
+    try {
+      const listKey = `webchat:messages:${chatId}`;
+      const messages = await redisManager.getClient().lrange(listKey, 0, -1);
+      
+      const parsedMessages = messages.map(msg => JSON.parse(msg));
+      
+      // Filter by timestamp if 'since' is provided
+      if (since) {
+        const sinceDate = new Date(since);
+        return parsedMessages.filter(msg => new Date(msg.timestamp) > sinceDate);
+      }
+      
+      return parsedMessages.reverse(); // Most recent first
+    } catch (error) {
+      logger.error('Error getting web chat messages:', { chatId, error });
+      return [];
+    }
+  }
+
+  /**
+   * Upload generated audio response to S3 (for TTS responses)
+   */
+  async uploadResponseAudio(audioBuffer: Buffer, userId: string, sessionId?: string): Promise<string> {
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const audioId = sessionId || uuidv4();
+      const key = `responses/${userId}/${timestamp}-${audioId}.mp3`;
+
+      const command = new PutObjectCommand({
+        Bucket: this.s3Bucket,
+        Key: key,
+        Body: audioBuffer,
+        ContentType: 'audio/mpeg',
+        ACL: 'public-read'
+      });
+
+      await s3Client.send(command);
+
+      // Construct public URL
+      const publicUrl = env.S3_ENDPOINT 
+        ? `${env.S3_ENDPOINT}/${this.s3Bucket}/${key}`
+        : `https://${this.s3Bucket}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+
+      logger.info('Response audio uploaded to S3 successfully', {
+        key,
+        publicUrl,
+        size: audioBuffer.length,
+        userId
+      });
+
+      return publicUrl;
+    } catch (error) {
+      logger.error('Error uploading response audio to S3:', { userId, error });
+      throw createError('Failed to upload response audio to storage', 500);
+    }
+  }
+
+  /**
+   * Clear old messages from Redis (cleanup job)
+   */
+  async cleanupOldWebChatMessages(olderThanHours: number = 24): Promise<void> {
+    try {
+      const pattern = 'webchat:messages:*';
+      const keys = await redisManager.getClient().keys(pattern);
+      
+      for (const key of keys) {
+        const ttl = await redisManager.getClient().ttl(key);
+        if (ttl > 0 && ttl < (olderThanHours * 3600)) {
+          await redisManager.getClient().del(key);
+          logger.debug('Cleaned up old web chat messages', { key });
+        }
+      }
+      
+      logger.info('Web chat messages cleanup completed', { 
+        keysProcessed: keys.length,
+        olderThanHours 
+      });
+    } catch (error) {
+      logger.error('Error during web chat messages cleanup:', error);
     }
   }
 }

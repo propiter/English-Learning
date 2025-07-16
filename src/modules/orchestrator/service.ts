@@ -39,7 +39,16 @@ export class OrchestratorService {
       const user = await userService.getUserById(userId);
       if (!user) throw createError(`User not found: ${userId}`, 404);
 
-      const textInput = content;
+      let textInput = content;
+      
+      // For audio input, content is already the S3 URL from gateway processing
+      if (inputType === 'audio') {
+        // Here we would call speech-to-text service to transcribe the audio
+        // For now, we'll use the S3 URL as placeholder until STT is implemented
+        textInput = `[Audio message: ${content}]`;
+        logger.info('Processing audio message', { userId, audioUrl: content, platform });
+      }
+      
       tracer.userInput(textInput);
 
       await this._saveToChatHistory(user.id, 'user', textInput);

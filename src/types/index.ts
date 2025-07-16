@@ -1,10 +1,11 @@
-export type Platform = 'telegram' | 'whatsapp';
+export type Platform = 'telegram' | 'whatsapp' | 'web';
 export type InputType = 'text' | 'audio';
 
 export interface User {
   id: string;
   telegramId?: string;
   whatsappId?: string;
+  webChatId?: string;
   firstName: string;
   lastName?: string;
   username?: string;
@@ -83,6 +84,7 @@ export interface MessagePayload {
     firstName?: string;
     lastName?: string;
     username?: string;
+    chatId?: string; // For web platform
   };
 }
 

@@ -3,6 +3,7 @@ import { messagingGatewayService } from './service.js';
 import { asyncHandler, createError } from '../../middleware/errorHandler.js';
 import { logger } from '../../utils/logger.js';
 import prisma from '../../config/database.js';
+import { userService } from '../users/service.js';
 
 export const gatewayController = {
   // Telegram webhook endpoint
@@ -129,6 +130,61 @@ export const gatewayController = {
     }
   },
 
+  // Web chat webhook endpoint
+  webChatWebhook: asyncHandler(async (req: Request, res: Response) => {
+    const webhookData = req.body;
+    
+    // Log incoming webhook for debugging
+    await prisma.webhookLog.create({
+      data: {
+        platform: 'webchat',
+        webhookData,
+        processed: false
+      }
+    });
+
+    logger.info('Received Web Chat webhook:', JSON.stringify(webhookData, null, 2));
+
+    try {
+      const result = await messagingGatewayService.processIncomingWebhook('web', webhookData);
+      
+      // Update webhook log
+      await prisma.webhookLog.updateMany({
+        where: {
+          platform: 'webchat',
+          processed: false,
+          webhookData: {
+            equals: webhookData
+          }
+        },
+        data: {
+          processed: true
+        }
+      });
+
+      res.json({ success: true, processed: result.processed });
+    } catch (error) {
+      logger.error('Error processing Web Chat webhook:', error);
+      
+      // Update webhook log with error
+      await prisma.webhookLog.updateMany({
+        where: {
+          platform: 'webchat',
+          processed: false,
+          webhookData: {
+            equals: webhookData
+          }
+        },
+        data: {
+          processed: true,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }
+      });
+
+      throw error;
+    }
+  }),
+
   // Internal endpoint to send messages
   sendMessage: asyncHandler(async (req: Request, res: Response) => {
     const { userId, platform, audioUrl, text } = req.body;
@@ -137,11 +193,50 @@ export const gatewayController = {
       throw createError('Missing required fields: userId, platform', 400);
     }
 
-    if (!['telegram', 'whatsapp'].includes(platform)) {
+    if (!['telegram', 'whatsapp', 'web'].includes(platform)) {
       throw createError('Invalid platform', 400);
     }
 
     const result = await messagingGatewayService.sendMessage(userId, platform, audioUrl, text);
+
+    res.json({
+      success: true,
+      data: { result }
+    });
+  }),
+
+  // Get messages for web chat (polling)
+  getWebChatMessages: asyncHandler(async (req: Request, res: Response) => {
+    const { chatId } = req.params;
+    const { since } = req.query;
+
+    const messages = await messagingGatewayService.getWebChatMessages(
+      chatId, 
+      since?.toString()
+    );
+
+    res.json({
+      success: true,
+      data: { messages, chatId }
+    });
+  }),
+
+  // Send message to web chat user
+  sendWebChatMessage: asyncHandler(async (req: Request, res: Response) => {
+    const { chatId } = req.params;
+    const { text, audioUrl } = req.body;
+
+    if (!text && !audioUrl) {
+      throw createError('Either text or audioUrl must be provided', 400);
+    }
+
+    // Find user by webChatId
+    const user = await userService.getUserByPlatformId('web', chatId);
+    if (!user) {
+      throw createError('User not found for this chat', 404);
+    }
+
+    const result = await messagingGatewayService.sendMessage(user.id, 'web', audioUrl, text);
 
     res.json({
       success: true,
