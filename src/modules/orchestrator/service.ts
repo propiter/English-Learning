@@ -25,13 +25,14 @@ export class OrchestratorService {
 
   private async initializeGraph() {
     try {
+      logger.info('Initializing conversational graph...');
       await graphService.loadAgentsFromDb();
+      this.compiledGraph = graphService.buildGraph();
+      logger.info('Conversational graph compiled and ready.');
     } catch (error) {
       logger.error('Error loading agents from database:', error);
       throw new Error(`Failed to initialize conversational graph: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-    this.compiledGraph = graphService.buildGraph();
-    logger.info('Conversational graph compiled and ready.');
   }
 
   /**
@@ -44,7 +45,11 @@ export class OrchestratorService {
     platform: Platform,
     messageData: any
   ): Promise<any> {
+    let audioUrl: string | undefined;
+
     try {
+      logger.info(`Processing ${inputType} message for user ${userId} on ${platform}`);
+      
       const user = await userService.getUserById(userId);
       if (!user) throw createError(`User not found: ${userId}`, 404);
 
@@ -75,26 +80,51 @@ export class OrchestratorService {
       
       tracer.userInput(textInput);
 
+      // Save user message to chat history
       await this._saveToChatHistory(user.id, 'user', textInput);
+      
+      // Load recent chat history
       const history = await this._loadChatHistory(user.id);
 
+      // Prepare initial state for the graph
       const initialState = {
         user,
         messages: [...history, new HumanMessage(textInput)],
+        userMessage: textInput, // Explicit user message
+        nextAgent: '',
+        agentOutcome: '',
+        lastAgent: ''
       };
 
+      logger.debug('Initial graph state:', {
+        userId: user.id,
+        userMessage: textInput,
+        historyLength: history.length,
+        userLevel: user.cefrLevel,
+        isOnboarding: user.isOnboarding,
+        onboardingStep: user.onboardingStep
+      });
+
+      // Invoke the conversational graph
       const finalState = await this.compiledGraph.invoke(initialState);
       
-      // The final AI response is the last message in the history that isn't a tool message.
-      const lastMessage = [...finalState.messages].reverse().find(m => m._getType() === 'ai');
-      const agentResponse = lastMessage?.content;
-      const agentName = finalState.lastAgent; 
+      // Extract the agent response
+      const agentResponse = finalState.agentOutcome;
+      const agentName = finalState.lastAgent;
+
+      logger.info('Graph execution completed', {
+        userId: user.id,
+        lastAgent: agentName,
+        hasResponse: !!agentResponse,
+        responseLength: typeof agentResponse === 'string' ? agentResponse.length : 0
+      });
 
       if (typeof agentResponse === 'string' && agentResponse) {
+        // Save assistant response to chat history
         await this._saveToChatHistory(user.id, 'assistant', agentResponse, agentName);
         
         // Generate audio response if TTS is available
-        let audioUrl: string | undefined;
+        
         if (textToSpeechService.isAvailable()) {
           try {
             const audioBuffer = await synthesizeText(agentResponse, {
@@ -111,37 +141,88 @@ export class OrchestratorService {
         
         // Send response back to user
         await messagingGatewayService.sendMessage(user.id, platform, audioUrl, agentResponse);
+        
+        logger.info('Response sent successfully', {
+          userId: user.id,
+          platform,
+          hasAudio: !!audioUrl,
+          textLength: agentResponse.length
+        });
+      } else {
+        logger.warn('No valid response from graph', { 
+          userId: user.id, 
+          lastAgent: agentName,
+          agentOutcome: finalState.agentOutcome 
+        });
+        
+        // Send fallback message
+        const fallbackMessage = "I'm processing your message. Please give me a moment.";
+        await messagingGatewayService.sendMessage(user.id, platform, undefined, fallbackMessage);
       }
 
-      return { ...finalState, agentOutcome: agentResponse, audioGenerated: !!audioUrl };
+      return { 
+        ...finalState, 
+        agentOutcome: agentResponse, 
+        audioGenerated: !!audioUrl 
+      };
 
     } catch (error) {
       logger.error('Critical error in orchestrator service:', {
-        userId, platform, error: error instanceof Error ? error.message : 'Unknown error',
+        userId, 
+        platform, 
+        inputType,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
       });
+      
+      // Try to send error message to user
+      try {
+        const user = await userService.getUserById(userId);
+        if (user) {
+          await messagingGatewayService.sendMessage(
+            user.id, 
+            platform, 
+            undefined, 
+            "I'm sorry, I'm having technical difficulties. Please try again in a moment."
+          );
+        }
+      } catch (sendError) {
+        logger.error('Failed to send error message to user:', sendError);
+      }
+      
       throw error;
     }
   }
 
   private async _loadChatHistory(userId: string): Promise<BaseMessage[]> {
-    const history = await prisma.chatHistory.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'asc' },
-      take: env.CHAT_HISTORY_WINDOW_SIZE,
-    });
+    try {
+      const history = await prisma.chatHistory.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: env.CHAT_HISTORY_WINDOW_SIZE,
+      });
 
-    return history.map(msg => {
-      if (msg.role === 'user') {
-        return new HumanMessage(msg.content);
-      }
-      return new AIMessage(msg.content);
-    });
+      // Reverse to get chronological order
+      return history.reverse().map(msg => {
+        if (msg.role === 'user') {
+          return new HumanMessage(msg.content);
+        }
+        return new AIMessage(msg.content);
+      });
+    } catch (error) {
+      logger.error('Error loading chat history:', { userId, error });
+      return [];
+    }
   }
 
   private async _saveToChatHistory(userId: string, role: 'user' | 'assistant', content: string, agentName?: string) {
-    await prisma.chatHistory.create({
-      data: { userId, role, content, agentName },
-    });
+    try {
+      await prisma.chatHistory.create({
+        data: { userId, role, content, agentName },
+      });
+    } catch (error) {
+      logger.error('Error saving to chat history:', { userId, role, error });
+    }
   }
 
   /**

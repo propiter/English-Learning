@@ -134,6 +134,13 @@ export const gatewayController = {
   webChatWebhook: asyncHandler(async (req: Request, res: Response) => {
     const webhookData = req.body;
     
+    logger.info('Received Web Chat webhook:', {
+      chatId: webhookData?.chat?.id,
+      username: webhookData?.chat?.username,
+      hasText: !!webhookData?.chat?.message?.text,
+      hasFile: !!webhookData?.chat?.message?.file
+    });
+    
     // Log incoming webhook for debugging
     await prisma.webhookLog.create({
       data: {
@@ -142,8 +149,6 @@ export const gatewayController = {
         processed: false
       }
     });
-
-    logger.info('Received Web Chat webhook:', JSON.stringify(webhookData, null, 2));
 
     try {
       const result = await messagingGatewayService.processIncomingWebhook('web', webhookData);
@@ -160,6 +165,11 @@ export const gatewayController = {
         data: {
           processed: true
         }
+      });
+
+      logger.info('Web Chat webhook processed successfully', {
+        chatId: webhookData?.chat?.id,
+        processed: result.processed
       });
 
       res.json({ success: true, processed: result.processed });

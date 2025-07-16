@@ -8,7 +8,8 @@ import { logger } from '../../utils/logger.js';
 import { tracer } from '../../utils/tracer.js';
 import { User } from '../../types/index.js';
 import { llmManager } from '../../config/llm.js';
-
+import { allTools } from '../agents/tools.js';
+import { JsonOutputParser } from '@langchain/core/output_parsers'
 /**
  * Defines the state that flows through the graph.
  * Each node can modify this state.
@@ -18,7 +19,8 @@ interface GraphState {
   messages: BaseMessage[];
   nextAgent: string;
   agentOutcome: string | object;
-  lastAgent: string; // FIX: Add explicit tracking for the agent that just ran
+  lastAgent: string;
+  userMessage: string; // Add explicit user message
 }
 
 /**
@@ -28,12 +30,40 @@ const agentRunnables: Record<string, Runnable> = {};
 
 /**
  * Defines the JSON schema for the orchestrator's output.
- * This ensures the LLM returns data in a predictable structure.
  */
 const orchestratorSchema = z.object({
-  agent_to_invoke: z.string().describe("The name of the agent to invoke next (e.g., 'onboarding', 'daily_practice', 'meta_query')."),
+  agent_to_invoke: z.string().describe("The name of the agent to invoke next. Must be one of: 'onboarding', 'daily_practice', 'meta_query', 'short_response', 'customer_service', 'text_summary'"),
   reasoning: z.string().describe("A brief explanation of why this agent was chosen."),
 });
+
+// Helper function to parse orchestrator response
+function parseOrchestratorResponse(response: any): { agent_to_invoke: string; reasoning: string } {
+  // If response is already in the correct format, return it
+  if (response && typeof response.agent_to_invoke === 'string' && typeof response.reasoning === 'string') {
+    return response;
+  }
+
+  // If response is a string, try to parse it as JSON
+  if (typeof response === 'string') {
+    try {
+      const parsed = JSON.parse(response);
+      if (parsed && typeof parsed.agent_to_invoke === 'string') {
+        return {
+          agent_to_invoke: parsed.agent_to_invoke,
+          reasoning: parsed.reasoning || 'No reasoning provided'
+        };
+      }
+    } catch (e) {
+      // If parsing fails, continue to fallback
+    }
+  }
+
+  // Fallback to default response
+  return {
+    agent_to_invoke: 'short_response',
+    reasoning: 'Defaulting to short_response due to invalid response format'
+  };
+}
 
 /**
  * Formats an array of BaseMessage objects into a string for the prompt.
@@ -55,44 +85,79 @@ class GraphService {
         messages: { value: (x, y) => x.concat(y), default: () => [] },
         nextAgent: { value: null },
         agentOutcome: { value: null },
-        lastAgent: { value: null }, // FIX: Add channel for lastAgent
+        lastAgent: { value: null },
+        userMessage: { value: null }, // Add userMessage channel
       },
     });
   }
 
   /**
    * Dynamically loads all active prompts from the database and compiles them into
-   * executable agent runnables. This is the core of our dynamic architecture.
+   * executable agent runnables.
    */
   async loadAgentsFromDb() {
     logger.info('Loading dynamic agents from database...');
     const prompts = await prisma.prompt.findMany({ where: { isActive: true } });
 
     for (const prompt of prompts) {
-      // The user-facing prompts are now complex and contain examples with JSON.
-      // We must escape all curly braces in the system message to prevent LangChain's
-      // prompt formatter from misinterpreting them as variables.
-      const escapedSystemMessage = prompt.systemMessage.replace(/{/g, '{{').replace(/}/g, '}}');
+      try {
+        const promptTemplate = ChatPromptTemplate.fromMessages([
+          ['system', prompt.systemMessage],
+          ['user', '{input}'],
+        ]);
+        
+        if (prompt.promptType === 'orchestrator') {
+          // FIX: Construir la cadena del orquestador correctamente
+          const client = await llmManager.getLLMClient({
+            temperature: 0.2,
+            maxTokens: 4096,
+          });
 
-      const promptTemplate = ChatPromptTemplate.fromMessages([
-        ['system', escapedSystemMessage],
-        ['user', '{input}'],
-      ]);
-      
-      if (prompt.promptType === 'orchestrator') {
-        // Usar el nuevo método para structured output
-        const structuredLLM = await llmManager.getStructuredLLMClient(orchestratorSchema, {
-          temperature: 0.2,
-          maxTokens: 4096,
-        });
-        agentRunnables[prompt.promptType] = promptTemplate.pipe(structuredLLM);
-      } else {
-        // Para agentes normales, usar cliente estándar
-        const model = await llmManager.getLLMClient({
-          temperature: 0.2,
-          maxTokens: 4096,
-        });
-        agentRunnables[prompt.promptType] = promptTemplate.pipe(model);
+          // Adjuntar las instrucciones de formato JSON al final del system message
+          const orchestratorPrompt = ChatPromptTemplate.fromMessages([
+            ['system', prompt.systemMessage + '\n\nTu respuesta DEBE ser un objeto JSON válido que siga este esquema:\n{schema}\n\nResponde ÚNICAMENTE con el JSON.'],
+            ['user', '{user_message}']
+          ]);
+          
+          const parser = new JsonOutputParser();
+          
+          // La cadena final es Prompt -> LLM -> Parser
+          agentRunnables[prompt.promptType] = orchestratorPrompt
+            .pipe(client)
+            .pipe(parser)
+            .withConfig({ runName: 'OrchestratorChain' });
+
+        } else {
+          // For regular agents, use standard client
+          const model = await llmManager.getLLMClient({
+            temperature: 0.2,
+            maxTokens: 4096,
+          });
+          
+          // For agents that need tools, check if the model supports tools
+          if (['onboarding', 'meta_query', 'customer_service'].includes(prompt.promptType) && 
+              typeof model.bindTools === 'function') {
+            try {
+              const modelWithTools = model.bindTools(allTools);
+              agentRunnables[prompt.promptType] = promptTemplate.pipe(modelWithTools);
+              logger.debug(`Bound tools to agent: ${prompt.promptType}`);
+            } catch (toolError) {
+              logger.warn(`Failed to bind tools to ${prompt.promptType}, falling back to model without tools:`, toolError);
+              agentRunnables[prompt.promptType] = promptTemplate.pipe(model);
+            }
+          } else {
+            // If tools are not supported or not needed, use the model as is
+            agentRunnables[prompt.promptType] = promptTemplate.pipe(model);
+            if (['onboarding', 'meta_query', 'customer_service'].includes(prompt.promptType)) {
+              logger.warn(`Model does not support tools, running ${prompt.promptType} without tools`);
+            }
+          }
+        }
+        
+        logger.debug(`Loaded agent: ${prompt.promptType} (${prompt.persona})`);
+      } catch (error) {
+        logger.error(`Failed to load agent ${prompt.promptType}:`, error);
+        throw error;
       }
     }
     logger.info(`Successfully loaded ${prompts.length} agents.`);
@@ -104,7 +169,11 @@ class GraphService {
   buildGraph() {
     this.graph
       .addNode('orchestrator', this.runOrchestrator.bind(this))
-      .addNode('daily_practice', this.runAgentNode.bind(this))
+      .addNode('daily_practice_A0', this.runAgentNode.bind(this))
+      .addNode('daily_practice_A1_A2', this.runAgentNode.bind(this))
+      .addNode('daily_practice_B1', this.runAgentNode.bind(this))
+      .addNode('daily_practice_B2', this.runAgentNode.bind(this))
+      .addNode('daily_practice_C1_C2', this.runAgentNode.bind(this))
       .addNode('onboarding', this.runAgentNode.bind(this))
       .addNode('meta_query', this.runAgentNode.bind(this))
       .addNode('short_response', this.runAgentNode.bind(this))
@@ -115,7 +184,11 @@ class GraphService {
     this.graph.setEntryPoint('orchestrator');
 
     this.graph.addConditionalEdges('orchestrator', this.routeFromOrchestrator, {
-      daily_practice: 'daily_practice',
+      daily_practice_A0: 'daily_practice_A0',
+      daily_practice_A1_A2: 'daily_practice_A1_A2',
+      daily_practice_B1: 'daily_practice_B1',
+      daily_practice_B2: 'daily_practice_B2',
+      daily_practice_C1_C2: 'daily_practice_C1_C2',
       onboarding: 'onboarding',
       meta_query: 'meta_query',
       short_response: 'short_response',
@@ -125,8 +198,12 @@ class GraphService {
       __end__: END,
     });
 
-    // All worker nodes should end the graph for now.
-    this.graph.addEdge('daily_practice', END);
+    // All worker nodes should end the graph
+    this.graph.addEdge('daily_practice_A0', END);
+    this.graph.addEdge('daily_practice_A1_A2', END);
+    this.graph.addEdge('daily_practice_B1', END);
+    this.graph.addEdge('daily_practice_B2', END);
+    this.graph.addEdge('daily_practice_C1_C2', END);
     this.graph.addEdge('onboarding', END);
     this.graph.addEdge('meta_query', END);
     this.graph.addEdge('short_response', END);
@@ -138,87 +215,186 @@ class GraphService {
   }
 
   /**
-   * The orchestrator node. It decides the next agent AND validates its existence.
+   * The orchestrator node decides the next agent.
    */
-  private async runOrchestrator(state: GraphState): Promise<Partial<GraphState>> {
-    const { messages, user } = state;
-    const orchestrator = agentRunnables['orchestrator'];
-    if (!orchestrator) {
-      const errorMessage = 'Critical Error: Orchestrator agent itself is not loaded.';
-      tracer.error('Orchestrator', errorMessage);
-      return { nextAgent: 'error_handler', agentOutcome: errorMessage, lastAgent: 'orchestrator' };
-    }
+private async runOrchestrator(state: GraphState): Promise<Partial<GraphState>> {
+  const { messages, user, userMessage } = state;
+  const orchestrator = agentRunnables['orchestrator'];
+  
+  if (!orchestrator) {
+    const errorMessage = 'Critical Error: Orchestrator agent not loaded.';
+    tracer.error('Orchestrator', errorMessage);
+    return { nextAgent: 'error_handler', agentOutcome: errorMessage, lastAgent: 'orchestrator' };
+  }
 
-    // FIX: Pass the full conversation history to the orchestrator prompt
-    const input = formatMessagesForPrompt(messages);
+  try {
+    const chatHistory = formatMessagesForPrompt(messages.slice(0, -1));
+    const currentMessage = userMessage || (messages.length > 0 ? messages[messages.length - 1]?.content : '') || '';
+    
+    // FIX: Preparar un input limpio para el prompt
+    const orchestratorInput = {
+      // --- Variables principales para el prompt refactorizado ---
+      user_message: currentMessage,
+      chat_history: chatHistory,
+      schema: JSON.stringify(orchestratorSchema.parameters || orchestratorSchema, null, 2),
 
-    const response = await orchestrator.invoke({ 
-      input,
-      // Pass other variables defined in the prompt
-      firstName: user.firstName,
-      user_message: messages[messages.length - 1].content,
-      chat_history: formatMessagesForPrompt(messages.slice(0, -1)),
-      workflow_status: user.onboardingStep,
-      user_cefr_level: user.cefrLevel,
-      studentName: user.firstName,
-      cefrLevel: user.cefrLevel,
-      onboardingStep: user.onboardingStep,
+      // --- Variables para compatibilidad con tu prompt actual en la DB ---
+      user_profile: JSON.stringify({
+        firstName: user.firstName,
+        cefrLevel: user.cefrLevel,
+        interests: user.interests,
+        learningGoal: user.learningGoal,
+        isOnboarding: user.isOnboarding,
+        onboardingStep: user.onboardingStep
+      }, null, 2),
+      workflow_status: user.onboardingStep || 'not in workflow',
+      user_cefr_level: user.cefrLevel || 'not specified',
+      // También agregamos otras variables que podrías tener en tu prompt
+      cefrLevel: user.cefrLevel || 'not specified',
+      studentName: user.firstName || 'student',
+      firstName: user.firstName || 'student',
       interests: user.interests?.join(', ') || 'not specified',
       learningGoal: user.learningGoal || 'not specified',
-      userProfile: JSON.stringify(user, null, 2),
-      user_profile: JSON.stringify(user, null, 2),
-    }) as { agent_to_invoke: string; reasoning: string };
+    };
+
+    logger.debug('Orchestrator input prepared', orchestratorInput);
+    
+    let response;
+    try {
+      // La invocación ahora es mucho más simple
+      const rawResponse = await orchestrator.invoke(orchestratorInput);
+      response = parseOrchestratorResponse(rawResponse); // Tu función de parseo sigue siendo útil
+      logger.debug('Orchestrator response:', response);
+    } catch (error) {
+      logger.error('Error invoking or parsing orchestrator response:', error);
+      // El error original que veías se captura aquí
+      throw new Error(`Failed to process orchestrator response: ${error.message}`);
+    }
     
     tracer.decision('Orchestrator', { 
-      decision: `LLM wants to invoke: ${response.agent_to_invoke}`, 
+      decision: response.agent_to_invoke, 
       reasoning: response.reasoning 
     });
     
-    const agentToInvoke = response.agent_to_invoke;
-    if (agentRunnables[agentToInvoke]) {
-      return { nextAgent: agentToInvoke, lastAgent: 'orchestrator' };
+    let agentToInvoke = response.agent_to_invoke?.toLowerCase().trim();
+    
+    if (agentToInvoke === 'daily_practice' || agentToInvoke?.startsWith('daily_practice_')) {
+      const level = user.cefrLevel?.toUpperCase();
+      if (level === 'A0') agentToInvoke = 'daily_practice_A0';
+      else if (level === 'A1' || level === 'A2') agentToInvoke = 'daily_practice_A1_A2';
+      else if (level === 'B1') agentToInvoke = 'daily_practice_B1';
+      else if (level === 'B2') agentToInvoke = 'daily_practice_B2';
+      else if (level === 'C1' || level === 'C2') agentToInvoke = 'daily_practice_C1_C2';
+      else agentToInvoke = 'daily_practice_A1_A2';
+    }
+    
+    if (agentToInvoke && agentRunnables[agentToInvoke]) {
+      return { 
+        nextAgent: agentToInvoke, 
+        lastAgent: 'orchestrator',
+        agentOutcome: `Routing to ${agentToInvoke}: ${response.reasoning}`
+      };
     } else {
-      const errorMessage = `Orchestrator picked an invalid or unloaded agent: '${agentToInvoke}'.`;
-      tracer.error('Orchestrator', errorMessage);
+      const availableAgents = Object.keys(agentRunnables).join(', ');
+      const errorMessage = `Invalid agent selected: '${agentToInvoke}'. Available agents: ${availableAgents}`;
+      logger.warn(errorMessage);
       return { 
         nextAgent: 'error_handler', 
         agentOutcome: errorMessage,
         lastAgent: 'orchestrator'
       };
     }
+  } catch (error) {
+    const errorMessage = `Orchestrator execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    tracer.error('Orchestrator', errorMessage);
+    logger.error('Orchestrator error:', { error, stack: error.stack }); // Loguea el stack para mejor depuración
+    return { 
+      nextAgent: 'error_handler', 
+      agentOutcome: errorMessage,
+      lastAgent: 'orchestrator'
+    };
   }
+}
 
   /**
-   * A generic node for running worker agents. It now assumes the agent exists.
+   * A generic node for running worker agents.
    */
   private async runAgentNode(state: GraphState): Promise<Partial<GraphState>> {
-    const { messages, nextAgent, user } = state;
+    const { messages, nextAgent, user, userMessage } = state;
     const agent = agentRunnables[nextAgent];
+
+    if (!agent) {
+      const errorMessage = `Agent '${nextAgent}' not found`;
+      tracer.error('AgentNode', errorMessage);
+      return { 
+        agentOutcome: errorMessage, 
+        lastAgent: nextAgent,
+        messages: [new AIMessage("I'm sorry, I encountered a technical issue. Please try again.")]
+      };
+    }
 
     tracer.route('Orchestrator', nextAgent);
     
-    // FIX: Pass the full conversation history to the agent's prompt
-    const input = formatMessagesForPrompt(messages);
+    try {
+      // Prepare comprehensive input for the agent
+      const chatHistory = formatMessagesForPrompt(messages.slice(0, -1));
+      const currentMessage = userMessage || messages[messages.length - 1]?.content || '';
+      
+      const agentInput = {
+        input: currentMessage,
+        firstName: user.firstName,
+        studentName: user.firstName,
+        onboardingStep: user.onboardingStep,
+        cefrLevel: user.cefrLevel,
+        interests: user.interests || [],
+        learningGoal: user.learningGoal,
+        userProfile: JSON.stringify(user, null, 2),
+        user_profile: JSON.stringify(user, null, 2),
+        user_message: currentMessage,
+        chat_history: chatHistory,
+        user_query: currentMessage,
+        evaluationJson: {} // Placeholder for evaluation data
+      };
 
-    const response = await agent.invoke({ 
-      input,
-      // Pass other common variables agents might need
-      firstName: user.firstName,
-      studentName: user.firstName,
-      onboardingStep: user.onboardingStep,
-      cefrLevel: user.cefrLevel,
-      interests: user.interests,
-      learningGoal: user.learningGoal,
-      userProfile: JSON.stringify(user),
-      // Add more variables as needed by different prompts
-    });
-    tracer.agentResponse(nextAgent, response.content as string);
+      logger.debug(`${nextAgent} input:`, agentInput);
 
-    return {
-      messages: [new AIMessage(response.content)],
-      agentOutcome: response.content,
-      lastAgent: nextAgent, // FIX: Explicitly set the agent that just ran
-    };
+      const response = await agent.invoke(agentInput);
+      
+      let responseContent: string;
+      
+      // Handle different response formats
+      if (typeof response === 'string') {
+        responseContent = response;
+      } else if (response && typeof response === 'object') {
+        if ('content' in response) {
+          responseContent = response.content;
+        } else if ('text' in response) {
+          responseContent = response.text;
+        } else {
+          responseContent = JSON.stringify(response);
+        }
+      } else {
+        responseContent = "I'm processing your request...";
+      }
+
+      tracer.agentResponse(nextAgent, responseContent);
+
+      return {
+        messages: [new AIMessage(responseContent)],
+        agentOutcome: responseContent,
+        lastAgent: nextAgent,
+      };
+    } catch (error) {
+      const errorMessage = `Agent '${nextAgent}' execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      tracer.error(nextAgent, errorMessage);
+      logger.error(`Agent ${nextAgent} error:`, error);
+      
+      return { 
+        agentOutcome: "I'm sorry, I encountered a technical issue. Please try again.",
+        lastAgent: nextAgent,
+        messages: [new AIMessage("I'm sorry, I encountered a technical issue. Please try again.")]
+      };
+    }
   }
 
   private runErrorHandler(state: GraphState): Partial<GraphState> {
@@ -228,7 +404,7 @@ class GraphService {
     return { 
       messages: [finalMessage], 
       agentOutcome: finalMessage.content,
-      lastAgent: 'error_handler' // FIX: Set lastAgent for error handler
+      lastAgent: 'error_handler'
     };
   }
 
@@ -236,7 +412,7 @@ class GraphService {
    * The routing logic that directs the conversation after the orchestrator runs.
    */
   private routeFromOrchestrator(state: GraphState): string {
-    return state.nextAgent;
+    return state.nextAgent || 'error_handler';
   }
 }
 
